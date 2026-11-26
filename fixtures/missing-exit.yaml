@@ -1,0 +1,20 @@
+# A3.3 fixture: no exit node. Every node has an outgoing edge, so in a finite
+# graph a cycle must exist too: this fixture's expected code SET is
+# {E_MISSING_EXIT, E_CYCLE}. They are two real defects, not one reported twice.
+id: missing-exit-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: b
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+edges:
+  - from: a
+    to: b
+  - from: b
+    to: a

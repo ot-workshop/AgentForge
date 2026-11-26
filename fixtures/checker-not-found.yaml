@@ -1,0 +1,9 @@
+# A3.3 fixture: a block whose check names a checker that is not in checks/.
+# The reference is the root cause; everything else is valid P0.
+id: checker-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:bad-check@1
+edges: []

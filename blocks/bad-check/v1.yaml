@@ -1,0 +1,14 @@
+id: bad-check
+version: 1
+agent: reviewer@1
+inputs:
+  request:
+    type: text
+    required: false
+outputs:
+  report:
+    type: file
+checks:
+  - name: repro
+    run: node --test
+    artifact: checks/repro.mjs

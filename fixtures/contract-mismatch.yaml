@@ -1,0 +1,18 @@
+# A3.3 fixture: a design node's input is bound to an upstream value of a
+# different type. `design` takes `request` (text); it is passed the plan output
+# of a sibling design node (tree), so the edge contract is the only root cause.
+id: contract-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: b
+    uses: block:design@1
+    with:
+      request: "{{a.plan}}"
+edges:
+  - from: a
+    to: b

@@ -1,0 +1,64 @@
+# A3.3 fixture: one node fans out to 9 successors (default max 8).
+id: fanout-demo
+version: 1
+entry: n0
+nodes:
+  - id: n0
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: n1
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: n2
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: n3
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: n4
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: n5
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: n6
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: n7
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: n8
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: n9
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+edges:
+  - from: n0
+    to: n1
+  - from: n0
+    to: n2
+  - from: n0
+    to: n3
+  - from: n0
+    to: n4
+  - from: n0
+    to: n5
+  - from: n0
+    to: n6
+  - from: n0
+    to: n7
+  - from: n0
+    to: n8
+  - from: n0
+    to: n9

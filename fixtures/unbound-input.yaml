@@ -1,0 +1,15 @@
+# A3.3 fixture: verify consumes build's `patch`, but build's required `plan` is
+# neither passed by `with` nor produced upstream, so that binding is missing.
+id: unbound-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:build@1
+  - id: b
+    uses: block:verify@1
+    with:
+      patch: "{{a.patch}}"
+edges:
+  - from: a
+    to: b

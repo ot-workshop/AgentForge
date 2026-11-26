@@ -1,0 +1,8 @@
+id: p0-loopid-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:build@1
+    loop_id: loop-1
+edges: []

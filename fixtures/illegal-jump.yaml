@@ -1,0 +1,24 @@
+# A3.3 fixture: a joins x and y, x jumps back to y although y is NOT an
+# ancestor of x (x and y are sibling branches produced by the join a). In P0
+# there are no bounded retry edges, so that back edge is an illegal jump.
+id: jump-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: x
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: y
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+edges:
+  - from: a
+    to: y
+  - from: a
+    to: x

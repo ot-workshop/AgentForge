@@ -1,0 +1,9 @@
+# A3.3 fixture: the flow references a block that does not exist in blocks/.
+# The reference is the root cause; nothing else in the file is wrong.
+id: missing-check-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:nope@1
+edges: []

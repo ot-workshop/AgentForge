@@ -1,0 +1,11 @@
+# A3.3 fixture: a human gate with no approver role. The graph itself is valid.
+id: gate-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+    gate: human
+edges: []

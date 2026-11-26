@@ -5,10 +5,16 @@ entry: design
 nodes:
   - id: design
     uses: block:design@1
+    with:
+      request: "{{input.request}}"
   - id: build
     uses: block:build@1
+    with:
+      plan: "{{design.plan}}"
   - id: verify
     uses: block:verify@1
+    with:
+      patch: "{{build.patch}}"
 edges:
   - from: design
     to: build
