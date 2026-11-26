@@ -12,6 +12,10 @@ import { canonicalJson } from './canonical.js';
 import { parseYaml } from './yamlish.js';
 
 const DEFAULT_STAGES = ['design', 'build', 'verify'];
+// Checker definitions live in the run dir and are read-only to the runner (A4.4).
+// A fixed content makes "was it changed" a byte comparison that never depends on
+// however the run dir was initialised before the stage.
+const CHECKER_CONTENT = '{"checks":[],"sealed":true}\n';
 
 export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
   const { stages, blocks } = loadFlow(flowPath);
@@ -122,10 +126,17 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
         payload: { iteration, inputs: [], contextSha256: contextSha },
       });
       const checksFile = path.join(runDir, 'checks.lock');
-      fs.writeFileSync(checksFile, JSON.stringify({ stage, iteration }) + '\n');
+      fs.writeFileSync(checksFile, CHECKER_CONTENT);
       const checksShaBefore = sha256Hex(fs.readFileSync(checksFile));
       const res = invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs: writer.nextSeq - 1, runId: id, checksFile });
-      const checksShaAfter = sha256Hex(fs.readFileSync(checksFile));
+      let checksShaAfter = sha256Hex(fs.readFileSync(checksFile));
+      const checksWritten = checksShaAfter !== checksShaBefore;
+      if (checksWritten) {
+        // The wall must refuse the write, not merely report it afterwards: put the
+        // checker file back exactly as it was (E_PERMISSION_GAP is still recorded).
+        fs.writeFileSync(checksFile, CHECKER_CONTENT);
+        checksShaAfter = sha256Hex(fs.readFileSync(checksFile));
+      }
       if (res.crash) {
         // Runner process died: exit 2, one stderr line, no error event (A5.8).
         writeWarnIfHalf(writer, runDir, id, stage);
@@ -161,7 +172,7 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
       } else if (res.submitError) {
         status = 'failed';
         error = res.submitError;
-      } else if (checksShaBefore !== checksShaAfter) {
+      } else if (checksWritten) {
         // Judgment wall: the checker file is read-only to the runner (A4.4).
         status = 'failed';
         error = structuredError({

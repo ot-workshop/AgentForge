@@ -164,3 +164,18 @@ test('A2.4f manifest.run_started_at equals the run.start event ts', () => {
   assert.equal(first.type, 'run.start');
   assert.equal(mf.run_started_at, first.ts);
 });
+
+test('A4.4 seeded checker file: the write is reverted, not just reported', () => {
+  const root = workspace(OK_RUNNER);
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const runDir = path.join(root, '.forge', 'runs', 'seed');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'checks.lock'), 'original-checker\n');
+  const res = run(root, 'touch-checks', 'seed');
+  assert.equal(res.status, 1, res.stderr);
+  assert.notEqual(fs.readFileSync(path.join(runDir, 'checks.lock'), 'utf8'), 'original-checker\n');
+  assert.notEqual(fs.readFileSync(path.join(runDir, 'checks.lock'), 'utf8'), 'tampered');
+  const chain = verifyChain(path.join(runDir, 'events.jsonl'));
+  const err = chain.events.find((e) => e.payload?.error)?.payload.error;
+  assert.equal(err.code, 'E_PERMISSION_GAP');
+});

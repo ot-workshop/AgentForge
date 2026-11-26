@@ -1,4 +1,5 @@
 # source: agentforge-v2.md §A3.3
+# doc-only: E_LIMIT_UNBOUNDED
 broken-yaml.yaml	E_SCHEMA_INVALID
 missing-check.yaml	E_UNKNOWN_REF
 cycle.yaml	E_CYCLE
