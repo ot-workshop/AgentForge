@@ -1,0 +1,10 @@
+{
+  "name": "agentforge",
+  "version": "0.0.0-m1",
+  "private": true,
+  "type": "module",
+  "bin": { "forge": "bin/forge.js" },
+  "scripts": {
+    "test": "node --test test/"
+  }
+}
