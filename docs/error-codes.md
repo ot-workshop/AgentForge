@@ -13,6 +13,24 @@ Uncaught internal crashes are not in this table: exit code 2 + one stderr line.
 - `sequence` — must be produced by an event stream; its criterion is appendix A5.
 - `runtime` — produced at run/request time; its criterion is appendix A2.4/A4.6/A5.12.
 
+### Fixture column `—`, and why
+
+- `E_ILLEGAL_JUMP` [P0.5] — a back edge `u -> v` always has `v` reaching `u`, so
+  `v` is an ancestor of `u`; with no bounded retry edges in P0, "a back edge
+  whose target is not an ancestor" is an empty set. The code has no P0 trigger
+  source and is verified in P0.5 (v2.4 A12.4; 员工一号 57cfe581).
+  `fixtures/illegal-jump.yaml` stays as the P0.5 shape; in P0 its code set is
+  `{E_MISSING_EXIT, E_CYCLE}`, which is what the tsv registers.
+- `E_LIMIT_UNBOUNDED` [P0.5] — every trigger (`on`, `max_iterations`) is itself a
+  P0.5 field, so a P0 flow reports `E_P0_UNSUPPORTED` first and never reaches this
+  code. `limit-unbounded.yaml` / `limit-suspect.yaml` keep their content as P0.5
+  material but are not registered in the P0 tsv.
+
+`E_MISSING_EXIT` and `E_CYCLE` are inseparable in a finite P0 graph: if every node
+has an outgoing edge, the graph must contain a cycle. `fixtures/missing-exit.yaml`
+therefore registers BOTH codes, and the acceptance test compares the expected code
+set with the actual one (no more, no less; 员工一号 5928fe89).
+
 `LOOP_LIMIT_SUSPECT_THRESHOLD = 1000` is defined here only; the validator and
 `fixtures/expected-codes.tsv` derive from this file.
 
@@ -21,7 +39,7 @@ Uncaught internal crashes are not in this table: exit code 2 + one stderr line.
 | `E_SCHEMA_INVALID` | block | false | `{action, path}` | rule | `fixtures/broken-yaml.yaml` |
 | `E_UNKNOWN_REF` | block | false | `{ref, refKind, available[]}` | rule | `fixtures/missing-check.yaml` |
 | `E_CYCLE` | block | true | `{cycle: [ids]}` | rule | `fixtures/cycle.yaml` |
-| `E_ILLEGAL_JUMP` | block | true | `{from, to}` | rule | `fixtures/illegal-jump.yaml` |
+| `E_ILLEGAL_JUMP` | block | true | `{from, to}` | rule | — (see note) |
 | `E_UNREACHABLE` | block | true | `{nodeId}` | rule | `fixtures/unreachable.yaml` |
 | `E_MISSING_ENTRY` | block | false | `{action}` | rule | `fixtures/missing-entry.yaml` |
 | `E_MISSING_EXIT` | block | false | `{action}` | rule | `fixtures/missing-exit.yaml` |
@@ -30,7 +48,7 @@ Uncaught internal crashes are not in this table: exit code 2 + one stderr line.
 | `E_PERMISSION_GAP` | block | true | `{tool, requiredBy, agentSpec, suggestAddTo}` | rule | `fixtures/permission-gap.yaml` |
 | `E_CHECKER_NOT_FOUND` | block | true | `{check, searched[]}` | rule | `fixtures/checker-not-found.yaml` |
 | `E_GATE_NO_APPROVER` | block | true | `{gate}` | rule | `fixtures/gate-no-approver.yaml` |
-| `E_LIMIT_UNBOUNDED` | block / warn | true | `{object, suggestedMax}` | rule | `fixtures/limit-unbounded.yaml` |
+| `E_LIMIT_UNBOUNDED` | block / warn | true | `{object, suggestedMax}` | rule | — (P0.5; see note) |
 | `E_FANOUT_EXCEEDED` | block | true | `{nodeId, fanout, max}` | rule | `fixtures/fanout-9.yaml` |
 | `E_NODE_COUNT_EXCEEDED` | block | false | `{count, max}` | rule | `fixtures/nodes-101.yaml` |
 | `E_DEPTH_EXCEEDED` | block | false | `{depth, max}` | rule | `fixtures/depth-4.yaml` |
