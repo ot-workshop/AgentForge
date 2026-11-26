@@ -8,6 +8,8 @@ nodes:
       request: r
   - id: b
     uses: block:build@1
+    with:
+      plan: "{{a.report}}"
 edges:
   - from: a
     to: b

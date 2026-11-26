@@ -204,7 +204,8 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
     if (!target || !sourceInfo) continue;
     const produced = new Set(sourceInfo.outputs);
     for (const req of target.required) {
-      const explicit = ids.get(e.to)?.with?.[req];
+      const explicitRaw = ids.get(e.to)?.with;
+      const explicit = explicitRaw && typeof explicitRaw === 'object' && req in explicitRaw ? explicitRaw[req] : undefined;
       if (!produced.has(req) || (explicit !== undefined && !produced.has(String(explicit).replace(/^\{\{\s*[^.]+\./, '').replace(/\}\}$/, '')))) {
         errors.push(code('E_CONTRACT_MISMATCH', {
           path: `${file}#${e.id ?? e.from + '->' + e.to}`,

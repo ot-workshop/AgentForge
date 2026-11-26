@@ -18,8 +18,14 @@ if (mode && mode.startsWith('fail-')) {
   else out({ ...base, status: 'ok' });
   process.exit(0);
 }
-if (mode === 'crash') {
-  process.stderr.write('fake-runner: simulated crash\n');
+const crashMode = mode === 'crash' || mode === 'crash-midwrite';
+if (crashMode) {
+  if (mode === 'crash-midwrite') {
+    // Write a half line straight into events.jsonl, then die (A5.8/A5.11).
+    const f = process.env.FORGE_EVENTS;
+    if (f) require('fs').appendFileSync(f, '{"seq":' + (Number(process.env.FORGE_PREV_SEQ) + 1) + ',"type":"stage.st');
+    process.stderr.write('fake-runner: simulated crash mid-write\n');
+  } else process.stderr.write('fake-runner: simulated crash\n');
   process.exit(2);
 }
 if (mode === 'crash-midwrite') {
