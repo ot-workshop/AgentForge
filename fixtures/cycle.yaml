@@ -1,12 +1,14 @@
-# A3.3 fixture: a cycle that is not a bounded retry edge
+# A3.3 fixture: a plain cycle (every node single-successor, no bounded retry)
 id: cycle-demo
 version: 1
 entry: a
 nodes:
   - id: a
-    uses: block:build@1
+    uses: block:test@1
+    with:
+      request: r
   - id: b
-    uses: block:verify@1
+    uses: block:build@1
 edges:
   - from: a
     to: b

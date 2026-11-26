@@ -4,9 +4,10 @@ agent: coder@1
 inputs:
   plan:
     type: tree
+    required: false
 outputs:
   patch:
     type: tree
 checks:
   - name: unit
-    run: node --test
+    run: node checks/unit.mjs

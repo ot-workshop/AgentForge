@@ -1,0 +1,13 @@
+id: contract-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:test@1
+    with:
+      request: r
+  - id: b
+    uses: block:build@1
+edges:
+  - from: a
+    to: b

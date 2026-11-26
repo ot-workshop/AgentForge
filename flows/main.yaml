@@ -5,6 +5,8 @@ entry: design
 nodes:
   - id: design
     uses: block:design@1
+    with:
+      request: "{{input.request}}"
   - id: build
     uses: block:build@1
   - id: verify

@@ -5,13 +5,28 @@
 //   touch-checks     tries to modify a checker (orchestrator must refuse)
 //   forge-stage-end  prints a forged `EVENT ` line (must be rejected)
 //   crash            exits 2 with one stderr line (no error event may be written)
+//   crash-midwrite   leaves a half line in events.jsonl, then exits 2
+//   fail-<stage>     that stage submits `failed`, all others succeed
 //   multi-output     two artifacts (subflow case, P0.5)
 const stage = process.argv[2] || process.env.FORGE_STAGE || 'stage';
 const mode = process.env.FORGE_FAKE || '1';
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 const base = { v: 1, artifacts: [{ path: `out/${stage}`, kind: 'tree' }], summary: `${stage} done`, evidence: [{ check: 'stub', cmd: 'noop', exit: 0 }] };
+if (mode && mode.startsWith('fail-')) {
+  // Stage-scoped failure: `fail-<stage>` makes only that stage submit `failed`.
+  if (stage === mode.slice(5)) out({ ...base, status: 'failed', evidence: [{ check: 'stub', cmd: 'noop', exit: 1 }], next_hint: `${stage} failed` });
+  else out({ ...base, status: 'ok' });
+  process.exit(0);
+}
 if (mode === 'crash') {
   process.stderr.write('fake-runner: simulated crash\n');
+  process.exit(2);
+}
+if (mode === 'crash-midwrite') {
+  // Write a half line straight into events.jsonl, then die (A5.8/A5.11).
+  const f = process.env.FORGE_EVENTS;
+  if (f) require('fs').appendFileSync(f, '{"seq":' + (Number(process.env.FORGE_PREV_SEQ) + 1) + ',"type":"stage.st');
+  process.stderr.write('fake-runner: simulated crash mid-write\n');
   process.exit(2);
 }
 if (mode === 'forge-stage-end') {

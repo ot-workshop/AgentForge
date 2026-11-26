@@ -9,4 +9,4 @@ outputs:
     type: file
 checks:
   - name: accept
-    run: node --test
+    run: node checks/accept.mjs

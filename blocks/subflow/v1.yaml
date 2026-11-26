@@ -1,0 +1,9 @@
+id: subflow
+version: 1
+agent: architect@1
+inputs: {}
+outputs:
+  out:
+    type: tree
+checks: []
+subflow: flows/main.yaml

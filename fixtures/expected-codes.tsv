@@ -1,4 +1,4 @@
-# source: docs/error-codes.md (mirrors agentforge-v2.4.md §A3.3) -- keep one truth
+# source: agentforge-v2.md §A3.3
 cycle.yaml	E_CYCLE
 unreachable.yaml	E_UNREACHABLE
 p0-unsupported-on.yaml	E_P0_UNSUPPORTED

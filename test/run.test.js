@@ -8,6 +8,7 @@ import { verifyChain, readEvents } from '../src/eventlog.js';
 import { acquireRunLock } from '../src/lock.js';
 
 const FORGE = new URL('../bin/forge.js', import.meta.url).pathname;
+const REAL_RUNNER = fs.readFileSync(new URL('../fixtures/fake-runner.js', import.meta.url), 'utf8');
 
 function workspace(runnerBody) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-run-'));
@@ -85,4 +86,47 @@ test('A5.8 runner process crash → exit 2, no new error event', () => {
   assert.match(res.stderr, /simulated crash/);
   const { events } = readEvents(path.join(root, '.forge', 'runs', 'r1', 'events.jsonl'));
   assert.ok(!events.some((e) => e.payload?.error));
+});
+
+test('A5.8 crash mid-write: run exits 2, no error event, half line repaired with a warn', () => {
+  const root = workspace(OK_RUNNER);
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  assert.equal(run(root, '1').status, 0);
+  const res = run(root, 'crash-midwrite');
+  assert.equal(res.status, 2, res.stderr + res.stdout);
+  const file = path.join(root, '.forge', 'runs', 'r1', 'events.jsonl');
+  const raw = fs.readFileSync(file, 'utf8');
+  assert.ok(raw.endsWith('\n'), 'a shipped run never ends with a half line');
+  const chain = verifyChain(file);
+  assert.equal(chain.ok, true);
+  assert.equal(chain.trailingPartial, false);
+  assert.ok(!chain.events.some((e) => e.payload?.error));
+  assert.ok(chain.events.some((e) => e.payload?.severity === 'warn' && /truncated/.test(e.payload.message)));
+});
+
+
+
+test('A5.9 a run started on an existing run truncates its half line before appending and records a warn', () => {
+  const root = workspace(OK_RUNNER);
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const file = path.join(root, '.forge', 'runs', 'r2', 'events.jsonl');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{"seq":1,"type":"stage.st');
+  const res = run(root, '1', 'r2');
+  assert.equal(res.status, 0, res.stderr);
+  const { events, trailingPartial } = readEvents(file);
+  assert.equal(trailingPartial, false);
+  assert.ok(events.some((e) => e.payload?.severity === 'warn' && /truncated/.test(e.payload.message)));
+  assert.equal(verifyChain(file).ok, true);
+});
+
+test('A4.4 touch-checks: a runner that modifies the checker file fails the stage', () => {
+  const root = workspace(OK_RUNNER);
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const res = run(root, 'touch-checks');
+  assert.notEqual(res.status, 0);
+  const chain = verifyChain(path.join(root, '.forge', 'runs', 'r1', 'events.jsonl'));
+  const err = chain.events.find((e) => e.payload?.error)?.payload.error;
+  assert.equal(err.code, 'E_PERMISSION_GAP');
+  assert.match(err.path, /checks\.lock/);
 });
