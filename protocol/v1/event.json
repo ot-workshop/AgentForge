@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forge.protocol/v1/event.json",
+  "title": "AgentForge event (one line of events.jsonl)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "seq", "ts", "run_id", "stage", "actor", "type", "payload", "prev", "hash"],
+  "properties": {
+    "v": { "const": 1 },
+    "seq": { "type": "integer", "minimum": 1 },
+    "ts": { "type": "string", "format": "date-time" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "stage": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_./-]+$" },
+    "iteration": { "type": "integer", "minimum": 1, "default": 1 },
+    "loop_id": { "type": ["string", "null"] },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name"],
+      "properties": {
+        "kind": { "enum": ["orchestrator", "agent", "checker", "human"] },
+        "name": { "type": "string", "minLength": 1 },
+        "spec": { "type": "string" }
+      }
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$"
+    },
+    "ext": { "type": "object", "default": {} },
+    "payload": { "type": "object" },
+    "prev": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

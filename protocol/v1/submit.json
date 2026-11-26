@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forge.protocol/v1/submit.json",
+  "title": "AgentForge Submit: what an agent hands back at the end of a stage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "status", "artifacts", "summary", "evidence"],
+  "properties": {
+    "v": { "const": 1 },
+    "status": { "enum": ["ok", "failed", "blocked"] },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["tree", "file"] },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["check", "cmd", "exit"],
+        "properties": {
+          "check": { "type": "string", "minLength": 1 },
+          "cmd": { "type": "string", "minLength": 1 },
+          "exit": { "type": "integer" },
+          "log": { "type": "string" }
+        }
+      }
+    },
+    "memory_writes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["layer", "content"],
+        "properties": {
+          "layer": { "enum": ["L1", "L2"] },
+          "content": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "next_hint": { "type": "string", "maxLength": 2000 }
+  }
+}

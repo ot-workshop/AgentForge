@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forge.protocol/v1/flow-graph.json",
+  "title": "AgentForge FlowGraph (flows/<name>.yaml): nodes reference blocks, edges carry conditions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "entry", "nodes"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "entry": { "type": "string" },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "uses"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$" },
+          "uses": { "type": "string", "pattern": "^block:[a-z][a-z0-9-]*@[0-9]+$" },
+          "with": { "type": "object" },
+          "gate": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "to"],
+        "properties": {
+          "id": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "on": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "status"],
+            "properties": {
+              "from": { "enum": ["check.result", "submit.status", "gate.decision"] },
+              "status": { "enum": ["pass", "fail"] },
+              "gate": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
