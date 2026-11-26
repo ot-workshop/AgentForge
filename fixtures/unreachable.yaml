@@ -1,11 +1,14 @@
+# A3.3 fixture: `lonely` is a second root that nothing reaches from the entry.
 id: unreachable-demo
 version: 1
 entry: a
 nodes:
   - id: a
-    uses: block:test@1
+    uses: block:design@1
     with:
-      request: r
+      request: "{{input.request}}"
   - id: lonely
-    uses: block:ops@1
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
 edges: []

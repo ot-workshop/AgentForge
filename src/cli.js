@@ -101,7 +101,7 @@ export function main(argv = process.argv.slice(2)) {
         const file = opts._[0];
         if (!file) throw usageError('validate <flow.yaml>');
         const doc = loadYamlFile(path.resolve(file));
-        const errors = validateFlow(doc, { file });
+        const errors = validateFlow(doc, { file, projectDir: root() });
         const block = errors.filter((e) => e.severity === 'block');
         if (json || errors.length) emitErrors(errors, json);
         else process.stdout.write(JSON.stringify({ errors: [] }) + '\n');

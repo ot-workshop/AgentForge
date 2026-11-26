@@ -35,11 +35,15 @@ export function loadYamlFile(file) {
 // Options:
 //   file       -- path text used as the prefix of every error's `path`
 //   p0         -- apply the P0-unsupported field scan (default true)
-//   projectDir -- the project whose blocks/ agents/ checks/ are consulted
-//                 (default: the current working directory). A project file that
-//                 will not parse is E_SCHEMA_INVALID at that file, never
-//                 E_UNKNOWN_REF: "the reference is fine, the content is broken".
-export function validateFlow(flow, { file = '<flow>', p0 = true, projectDir = process.cwd() } = {}) {
+//   projectDir -- REQUIRED: the project whose blocks/ checks/ are consulted.
+//                 There is no fallback to the current working directory: a
+//                 library call that forgot the project would silently judge a
+//                 different project (fewer errors, looks like a pass). Missing
+//                 projectDir throws a usage error the CLI turns into exit 2.
+//                 A project file that will not parse is E_SCHEMA_INVALID at that
+//                 file, never E_UNKNOWN_REF: "the reference is fine, the content
+//                 is broken".
+export function validateFlow(flow, { file = '<flow>', p0 = true, projectDir = null } = {}) {
   if (flow == null) return [code('E_SCHEMA_INVALID', { locatable: false, path: file, fix: { action: 'fix-syntax', detail: 'empty document' } })];
   const errors = [];
   if (Array.isArray(flow)) {
@@ -86,18 +90,7 @@ export function validateFlow(flow, { file = '<flow>', p0 = true, projectDir = pr
     }
     out.get(e.from).push(e.to);
   }
-  const forwardReaches = (from, to) => {
-    const setD = new Set();
-    const stD = [from];
-    while (stD.length) {
-      const cur = stD.pop();
-      if (cur === to) return true;
-      if (setD.has(cur)) continue;
-      setD.add(cur);
-      for (const t of out.get(cur) ?? []) stD.push(t);
-    }
-    return false;
-  };
+
   for (const [id, targets] of out) {
     if (targets.length > MAX_FANOUT) errors.push(code('E_FANOUT_EXCEEDED', { path: `${file}#${id}`, ids: [id], fix: { nodeId: id, fanout: targets.length, max: MAX_FANOUT } }));
   }
@@ -130,29 +123,18 @@ export function validateFlow(flow, { file = '<flow>', p0 = true, projectDir = pr
   };
   for (const n of nodes) if (!state.get(n.id)) dfs(n.id);
   if (cycle.length) errors.push(code('E_CYCLE', { path: `${file}#${cycle[0][0]}`, ids: cycle[0], fix: { cycle: cycle[0] } }));
-  // A back edge to a node that is not an ancestor of the edge's source is an
-  // illegal jump (E_ILLEGAL_JUMP), independent of E_CYCLE: it is a target the
-  // graph could not have reached by going forward. In P0 there are no bounded
-  // retry edges, so every back edge is judged this way.
-  // Ancestors = anything that reaches `id` going forward. Only edges already
-  // placed in `out` are walked, so a back edge cannot make a node its own
-  // ancestor (which would make every cycle look legal).
-  const ancestorsOf = (id) => {
-    const set = new Set();
-    const up = [id];
-    while (up.length) {
-      const cur = up.pop();
-      for (const [from, targets] of out) if (targets.includes(cur) && !set.has(from)) { set.add(from); up.push(from); }
-    }
-    return set;
-  };
-  for (const e of edges) {
-    if (!ids.has(e.from) || !ids.has(e.to)) continue;
-    if (!forwardReaches(e.to, e.from)) continue; // not a back edge at all
-    errors.push(code('E_ILLEGAL_JUMP', { path: `${file}#${e.to}`, ids: [e.from, e.to], fix: { from: e.from, to: e.to } }));
-  }
+  // E_ILLEGAL_JUMP is NOT emitted here. By definition a back edge u -> v has v
+  // reaching u, so v is always an ancestor of u: with no bounded retry edges
+  // (P0), "a back edge whose target is not an ancestor" is an empty set. The
+  // code has no trigger source in P0 and is verified in P0.5 instead
+  // (员工一号 57cfe581, v2.4 A12.4 [P0.5]).
   // Everything below reads project files (blocks/, checks/) through one loader,
   // so "missing" and "present but broken" stay distinguishable.
+  if (!projectDir) {
+    const err = new Error('validateFlow needs projectDir (the root with blocks/ and checks/); not falling back to cwd');
+    err.exitCode = 2;
+    throw err;
+  }
   const project = new Project(projectDir);
   // blocks present, and their checks / gates / inputs resolvable?
   const contracts = new Map(); // node id -> block document, for the edge contract check

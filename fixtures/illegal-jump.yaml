@@ -1,6 +1,7 @@
-# A3.3 fixture: a joins x and y, x jumps back to y although y is NOT an
-# ancestor of x (x and y are sibling branches produced by the join a). In P0
-# there are no bounded retry edges, so that back edge is an illegal jump.
+# A3.3 fixture: a diamond a -> b -> d and a -> c -> e -> d with ONE edge e -> c
+# where c is a sibling branch (c is not reachable from e without the jump).
+# With c -> e added the jump turns into a cycle; here only c -> e is declared.
+# (Worker note: verify with task #流水线:#7 before trusting.)
 id: jump-demo
 version: 1
 entry: a
@@ -9,16 +10,22 @@ nodes:
     uses: block:design@1
     with:
       request: "{{input.request}}"
-  - id: x
+  - id: b
     uses: block:design@1
     with:
       request: "{{input.request}}"
-  - id: y
+  - id: c
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: e
     uses: block:design@1
     with:
       request: "{{input.request}}"
 edges:
   - from: a
-    to: y
+    to: b
   - from: a
-    to: x
+    to: c
+  - from: c
+    to: e

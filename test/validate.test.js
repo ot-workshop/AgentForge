@@ -17,18 +17,34 @@ test('A3.1 the linear sample validates with no errors', () => {
   assert.deepEqual(JSON.parse(r.stdout).errors, []);
 });
 
-test('A3.3 every fixture reports its expected code from expected-codes.tsv', () => {
-  const tsv = fs
+test('A3.3 every fixture reports exactly its expected code set from expected-codes.tsv', () => {
+  // fixture<TAB>code, one row per (fixture, code): a fixture may expect more
+  // than one code (missing-exit is E_MISSING_EXIT + E_CYCLE in a finite P0
+  // graph). The comparison is the full multiset: no missing code, no extra one.
+  const rows = fs
     .readFileSync(path.join(ROOT, 'fixtures/expected-codes.tsv'), 'utf8')
     .split('\n')
     .filter((l) => l.trim() && !l.startsWith('#'))
     .map((l) => l.split('\t'));
-  assert.ok(tsv.length >= 5);
-  for (const [name, code] of tsv) {
+  assert.ok(rows.length >= 5);
+  const expected = new Map();
+  for (const [name, code] of rows) {
+    if (!expected.has(name)) expected.set(name, []);
+    expected.get(name).push(code);
+  }
+  for (const [name, codes] of expected) {
     const r = validate('fixtures/' + name);
-    assert.equal(r.status, 1, name);
     const errs = JSON.parse(r.stdout).errors;
-    assert.ok(errs.some((e) => e.code === code), `${name} expected ${code}, got ${errs.map((e) => e.code)}`);
+    assert.equal(r.status, 1, name);
+    assert.deepEqual([...errs.map((e) => e.code)].sort(), [...codes].sort(), `${name}: expected ${codes.sort()}, got ${errs.map((e) => e.code)}`);
+  }
+  // Every fixture that reports an error must be registered: a file that fails
+  // and is not in the tsv would otherwise hide behind the loop above.
+  const dir = fs.readdirSync(path.join(ROOT, 'fixtures')).filter((f) => f.endsWith('.yaml')).sort();
+  for (const f of dir) {
+    if (expected.has(f)) continue;
+    const r = validate('fixtures/' + f);
+    assert.equal(r.status, 0, `${f} reports errors but has no tsv row: ${r.stdout}`);
   }
 });
 
