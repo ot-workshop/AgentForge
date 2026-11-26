@@ -33,7 +33,13 @@ export function loadYamlFile(file) {
 }
 
 // A flow may be a plain list of stage names (linear sample) or a FlowGraph.
-export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
+//   projectDir -- the ONE project directory every file-reading rule uses
+//                 (`blocks/`, `agents/`, `checks/`). When the caller gives it, it
+//                 is used as-is; when it does not, it is resolved once from
+//                 `file` (the flow's nearest ancestor holding blocks/). It is
+//                 never re-derived per rule, so a caller cannot get a mix of
+//                 "some rules judged the flow's project, others the cwd's".
+export function validateFlow(flow, { file = '<flow>', p0 = true, projectDir = null } = {}) {
   if (flow == null) return [code('E_SCHEMA_INVALID', { locatable: false, path: file, fix: { action: 'fix-syntax', detail: 'empty document' } })];
   const errors = [];
   if (Array.isArray(flow)) {
@@ -91,15 +97,17 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
 
   // Seams: every required input must be fed by an upstream output or by `with`.
   // Block outputs are looked up in blocks/<id>/v<n>.yaml next to the flow.
-  const projectRoot = (() => {
-    let dir = path.dirname(path.resolve(file));
-    for (;;) {
-      if (fs.existsSync(path.join(dir, 'blocks'))) return dir;
-      const up = path.dirname(dir);
-      if (up === dir) return path.dirname(path.resolve(file));
-      dir = up;
-    }
-  })();
+  const projectRoot = projectDir
+    ? path.resolve(projectDir)
+    : (() => {
+        let dir = path.dirname(path.resolve(file));
+        for (;;) {
+          if (fs.existsSync(path.join(dir, 'blocks'))) return dir;
+          const up = path.dirname(dir);
+          if (up === dir) return path.dirname(path.resolve(file));
+          dir = up;
+        }
+      })();
   const blocksRoot = path.join(projectRoot, 'blocks');
   const blockOutputs = (uses) => {
     const m = /^block:([a-z][a-z0-9-]*)@([0-9]+)$/.exec(uses ?? '');
@@ -184,20 +192,11 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
   };
   for (const n of nodes) if (!state.get(n.id)) dfs(n.id);
   if (cycle.length) {
-    // A cycle whose nodes have a single successor is a plain cycle (E_CYCLE);
-    // one with a branch plus an unbounded back edge is E_LIMIT_UNBOUNDED instead.
-    const hasExit = nodes.some((n) => (out.get(n.id) ?? []).length === 0);
-    // A loop whose nodes are unique is a plain cycle. Two back edges meeting at
-    // one node (a sibling loop) are jumps and reported as E_ILLEGAL_JUMP instead.
-    const hasTwoBackEdges = cycle.some((c) => {
-      const idsInCycle = c.slice(0, -1);
-      return idsInCycle.some((id) => idsInCycle.some((t) => t !== id && forwardClosure(id, null).has(t)) && forwardClosure(id, null).has(idsInCycle[(idsInCycle.indexOf(id) + 1) % idsInCycle.length]) === false);
-    });
-    const simple = hasExit && !hasTwoBackEdges && cycle.every((c) => {
-      const idsInCycle = c.slice(0, -1);
-      return idsInCycle.length === new Set(idsInCycle).size;
-    });
-    if (simple) errors.push(code('E_CYCLE', { path: `${file}#${cycle[0][0]}`, ids: cycle[0], fix: { cycle: cycle[0] } }));
+    // Every cycle is E_CYCLE. A cycle is never suppressed: with no bounded retry
+    // edges in P0, "no exit node" implies a cycle, so E_MISSING_EXIT and E_CYCLE
+    // are two real defects that coexist (员工一号 5928fe89); the acceptance test
+    // compares the expected code SET, not "exactly one" (员工一号 5928fe89).
+    errors.push(code('E_CYCLE', { path: `${file}#${cycle[0][0]}`, ids: cycle[0], fix: { cycle: cycle[0] } }));
   }
 
   // Edges first: a jump back to a non-ancestor is illegal; a bounded retry back to an
@@ -240,10 +239,13 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
       }
       return false;
     })();
-    if (backEdge && !reaches) {
-      illegalEdges.add(e);
-      errors.push(code('E_ILLEGAL_JUMP', { path: `${file}#${e.id ?? e.from}`, ids: [e.from, e.to], fix: { from: e.from, to: e.to } }));
-    }
+    // E_ILLEGAL_JUMP is not emitted in P0. By definition a back edge u -> v has v
+    // reaching u, so v is always an ancestor of u: "a back edge whose target is
+    // not an ancestor" is an empty set with no bounded retry edges. The code is
+    // verified in P0.5 (v2.4 A12.4 [P0.5]; 员工一号 57cfe581). `backEdge`/`reaches`
+    // stay computed because the retry/limit rule below keys off the same notion.
+    void backEdge;
+    void reaches;
   }
 
   // Contract seams: an edge whose source output does not satisfy the target input type.

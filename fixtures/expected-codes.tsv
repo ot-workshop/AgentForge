@@ -3,10 +3,10 @@
 broken-yaml.yaml	E_SCHEMA_INVALID
 missing-check.yaml	E_UNKNOWN_REF
 cycle.yaml	E_CYCLE
-illegal-jump.yaml	E_ILLEGAL_JUMP
 unreachable.yaml	E_UNREACHABLE
 missing-entry.yaml	E_MISSING_ENTRY
 missing-exit.yaml	E_MISSING_EXIT
+missing-exit.yaml	E_CYCLE
 contract-mismatch.yaml	E_CONTRACT_MISMATCH
 unbound-input.yaml	E_UNBOUND_INPUT
 permission-gap.yaml	E_PERMISSION_GAP
@@ -19,3 +19,5 @@ p0-unsupported-on.yaml	E_P0_UNSUPPORTED
 p0-unsupported-max_iterations.yaml	E_P0_UNSUPPORTED
 p0-unsupported-group.yaml	E_P0_UNSUPPORTED
 p0-unsupported-loop_id.yaml	E_P0_UNSUPPORTED
+illegal-jump.yaml	E_MISSING_EXIT
+illegal-jump.yaml	E_CYCLE
