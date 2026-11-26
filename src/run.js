@@ -9,21 +9,114 @@ import { acquireRunLock } from './lock.js';
 import { sha256Hex } from './chain.js';
 import { structuredError } from './errors.js';
 import { canonicalJson } from './canonical.js';
+import { parseYaml } from './yamlish.js';
 
 const DEFAULT_STAGES = ['design', 'build', 'verify'];
+// Checker definitions live in the run dir and are read-only to the runner (A4.4).
+// A fixed content makes "was it changed" a byte comparison that never depends on
+// however the run dir was initialised before the stage.
+const CHECKER_CONTENT = '{"checks":[],"sealed":true}\n';
 
-export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
-  const stages = loadStages(flowPath);
+export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
+  const { stages, blocks } = loadFlow(flowPath);
   const runsDir = path.join(rootDir, '.forge', 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
   const id = runId ?? new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14) + '-' + Math.random().toString(16).slice(2, 6);
   const runDir = path.join(runsDir, id);
-  fs.mkdirSync(runDir, { recursive: true });
+  const isNewRun = !fs.existsSync(runDir);
+  if (isNewRun) fs.mkdirSync(runDir, { recursive: true });
 
+  // Drift check before anything is written to the run: a refused start leaves
+  // no event and no repair behind (A7.2). Running this before the writer opens
+  // also avoids truncating a half line on a start that will be refused.
+  {
+    const prior = fs.existsSync(path.join(runDir, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8')) : null;
+    if (flowPath && fs.existsSync(flowPath) && prior) {
+      const { checkRefs } = await import('./refs.js');
+      const refs = checkRefs({ rootDir, runId: id });
+      if (!refs.ok && !allowDrift) throw { errors: refs.errors, exitCode: 1 };
+      if (allowDrift && refs.drifts.length) driftAccepted = refs.drifts;
+    }
+  }
+  // Drift accepted under --allow-drift; carried in a local so the `ref.drift`
+  // event does not depend on a temporary field of `blocks` (A5.5).
+  let driftAccepted = null;
+  // A7.2: a fresh run id must still refuse to start when a block the flow uses
+  // changed since the most recent manifest recorded it.
+  // `allowDrift` only decides what to do with a detected drift (throw or record
+  // `ref.drift`); detection itself must always run (A7.2/A5.5).
+  if (flowPath && fs.existsSync(flowPath)) {
+    let latest = null;
+    let latestAt = '';
+    for (const rid of fs.readdirSync(runsDir)) {
+      const mf = path.join(runsDir, rid, 'manifest.json');
+      if (!fs.existsSync(mf)) continue;
+      try {
+        const j = JSON.parse(fs.readFileSync(mf, 'utf8'));
+        if (path.resolve(j.flow?.path ?? '') !== path.resolve(flowPath)) continue;
+        const at = String(j.run_started_at ?? '');
+        if (at > latestAt) {
+          latestAt = at;
+          latest = j;
+        }
+      } catch {
+        /* an unreadable old manifest cannot be used as evidence */
+      }
+    }
+    if (latest) {
+      const blocksRoot = path.join(path.dirname(flowPath), '..', 'blocks');
+      const drift = [];
+      for (const [nodeId, rec] of Object.entries(latest.blocks ?? {})) {
+        const m = /^block:([a-z][a-z0-9-]*)@([0-9]+)$/.exec(rec.ref ?? '');
+        if (!m) continue;
+        const bf = path.join(blocksRoot, m[1], `v${m[2]}.yaml`);
+        const actual = fs.existsSync(bf) ? sha256Hex(fs.readFileSync(bf)) : null;
+        const current = blocks[nodeId];
+        // `blocks` here is the freshly loaded flow: it carries the *current* sha, so
+        // the comparison must be against the recorded sha, never against it.
+        const recordedOnly = rec.sha256;
+        if (actual !== recordedOnly) drift.push({ nodeId, ref: rec.ref, recordedSha256: recordedOnly, actualSha256: actual });
+      }
+      if (drift.length) {
+        const err = {
+          errors: drift.map((d) =>
+            structuredError({
+              code: 'E_BLOCK_CONTENT_DRIFT',
+              severity: 'block',
+              locatable: false,
+              path: `blocks/${d.ref.slice(6).split('@')[0]}/v${d.ref.split('@')[1]}.yaml`,
+              ids: [d.ref],
+              fix: { action: 'review the edit, then rerun with --allow-drift or restore the recorded content', recordedSha256: d.recordedSha256, actualSha256: d.actualSha256 },
+            }),
+          ),
+          exitCode: 1,
+        };
+        if (!allowDrift) {
+          err.beforeWrite = true;
+          throw err;
+        }
+        driftAccepted = drift;
+      }
+    }
+  }
   const lock = acquireRunLock(runDir);
-  const writer = new EventWriter(runDir, []).open();
+  const existing = fs.existsSync(path.join(runDir, 'events.jsonl')) ? readEvents(path.join(runDir, 'events.jsonl')).events : [];
+  // Any half-written tail is found from the bytes on disk; never open a temporary
+  // writer here (its constructor may append a resume marker of its own).
+  const _rep = existing.length ? readEvents(path.join(runDir, 'events.jsonl')).trailingPartial : false;
+  const tailOk = existing.length === 0 || fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8').endsWith('\n');
+  const writer = new EventWriter(runDir, existing).open();
+  const notesRun = { run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' } };
   try {
-    writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.start', payload: { flow: flowPath ?? null, fake: fake ?? null } });
+    // A resumed run records the (re)start in the same chain instead of replacing it.
+    if (existing.length) writer.append({ ...notesRun, type: 'log', payload: { severity: 'info', message: 'resumed existing run' } });
+    if (!tailOk) writer.append({ ...notesRun, type: 'log', payload: { severity: 'warn', message: 'trailing partial line truncated before append' } });
+    // A fresh run id with an empty run dir must start at seq 1 (A5.4).
+    if (isNewRun && writer.nextSeq !== 1) writer.resetChain();
+    const runStart = writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.start', payload: { flow: flowPath ?? null, fake: fake ?? null } });
+    if (driftAccepted) {
+      writer.append({ run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'ref.drift', payload: { drift: driftAccepted, acceptedBy: 'flag' } });
+    }
     for (const stage of stages) {
       const iteration = 1;
       const ctx = { runId: id, stage, iteration, prevArtifacts: [] };
@@ -36,9 +129,22 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
         type: 'stage.start',
         payload: { iteration, inputs: [], contextSha256: contextSha },
       });
-      const res = invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration });
+      const checksFile = path.join(runDir, 'checks.lock');
+      fs.writeFileSync(checksFile, CHECKER_CONTENT);
+      const checksShaBefore = sha256Hex(fs.readFileSync(checksFile));
+      const res = invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs: writer.nextSeq - 1, runId: id, checksFile });
+      let checksShaAfter = sha256Hex(fs.readFileSync(checksFile));
+      const checksWritten = checksShaAfter !== checksShaBefore;
+      if (checksWritten) {
+        // The wall must refuse the write, not merely report it afterwards: put the
+        // checker file back exactly as it was (E_PERMISSION_GAP is still recorded).
+        fs.writeFileSync(checksFile, CHECKER_CONTENT);
+        checksShaAfter = sha256Hex(fs.readFileSync(checksFile));
+      }
       if (res.crash) {
         // Runner process died: exit 2, one stderr line, no error event (A5.8).
+        writeWarnIfHalf(writer, runDir, id, stage);
+        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'crashed', runStartedAt: runStart.ts, drift: driftAccepted });
         writer.append({ run_id: id, stage, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'crashed' } });
         const err = new Error(res.stderr.trim().split('\n')[0] || 'runner crashed');
         err.exitCode = 2;
@@ -57,8 +163,7 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
           ids: [`stage:${stage}`],
           fix: { action: 'attach evidence entries: {check, cmd, exit}' },
         });
-      }
-      if (res.illegalEvent) {
+      } else if (res.illegalEvent) {
         status = 'failed';
         error = structuredError({
           code: 'E_ILLEGAL_STAGE_WRITE',
@@ -71,9 +176,18 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
       } else if (res.submitError) {
         status = 'failed';
         error = res.submitError;
-      } else if (status === 'failed') {
-        /* evidence wall already set the error */
-      } else if (res.submit.status !== 'ok') {
+      } else if (checksWritten) {
+        // Judgment wall: the checker file is read-only to the runner (A4.4).
+        status = 'failed';
+        error = structuredError({
+          code: 'E_PERMISSION_GAP',
+          severity: 'block',
+          locatable: false,
+          path: `runs/${id}/checks.lock`,
+          ids: [`stage:${stage}`],
+          fix: { tool: 'write_checks', requiredBy: 'runner', agentSpec: null, suggestAddTo: 'may_not 冲突' },
+        });
+      } else if (status === 'ok' && res.submit.status !== 'ok') {
         status = res.submit.status;
         error = structuredError({
           code: 'E_STAGE_FAILED',
@@ -93,13 +207,17 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
         payload: { iteration, status, submit: res.submit ?? null, ...(error ? { error } : {}) },
       });
       if (status !== 'ok') {
+        writeWarnIfHalf(writer, runDir, id, stage);
         writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'failed' } });
         writer.sync();
+        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'failed', runStartedAt: runStart.ts, drift: driftAccepted });
         return { exitCode: 1, runId: id, error };
       }
     }
+    writeWarnIfHalf(writer, runDir, id, null);
     writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'ok' } });
     writer.sync();
+    writeManifest(runDir, { runId: id, flowPath, blocks, status: 'ok', runStartedAt: runStart.ts, drift: driftAccepted });
     return { exitCode: 0, runId: id };
   } finally {
     writer.close();
@@ -118,12 +236,42 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
   }
 }
 
-function loadStages(flowPath) {
-  if (!flowPath || !fs.existsSync(flowPath)) return DEFAULT_STAGES;
-  const text = fs.readFileSync(flowPath, 'utf8');
-  const names = [...text.matchAll(/^\s*-\s*(?:id:\s*)?([A-Za-z0-9_-]+)\s*$/gm)].map((m) => m[1]);
-  return names.length ? names : DEFAULT_STAGES;
+function loadFlow(flowPath) {
+  if (!flowPath || !fs.existsSync(flowPath)) return { stages: DEFAULT_STAGES, blocks: {} };
+  const doc = parseYaml(fs.readFileSync(flowPath, 'utf8'), flowPath);
+  if (Array.isArray(doc)) return { stages: doc, blocks: {} };
+  const nodes = doc.nodes ?? [];
+  const blocksRoot = path.join(path.dirname(flowPath), '..', 'blocks');
+  const blocks = {};
+  for (const n of nodes) {
+    const m = /^block:([a-z][a-z0-9-]*)@([0-9]+)$/.exec(n.uses ?? '');
+    if (!m) continue;
+    const f = path.join(blocksRoot, m[1], `v${m[2]}.yaml`);
+    blocks[n.id] = { ref: n.uses, sha256: fs.existsSync(f) ? sha256Hex(fs.readFileSync(f)) : null, file: f, with: n.with ?? {} };
+  }
+  return { stages: nodes.map((n) => n.id), blocks };
 }
+
+function writeManifest(runDir, { runId, flowPath, blocks, status, runStartedAt, drift }) {
+  const file = path.join(runDir, 'manifest.json');
+  const prev = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  const refs = { ...(prev.blocks ?? {}), ...blocks };
+  const manifest = {
+    run_id: runId,
+    // Must equal the `run.start` event ts of this run (A2.4f); a resumed run keeps its first one.
+    run_started_at: prev.run_started_at ?? runStartedAt ?? new Date().toISOString(),
+    flow: flowPath ? { path: flowPath, sha256: fs.existsSync(flowPath) ? sha256Hex(fs.readFileSync(flowPath)) : null } : null,
+    // order is fixed: content sha256 -> validator version -> validation result
+    blocks: Object.fromEntries(Object.entries(refs).map(([id, b]) => [id, { ref: b.ref, sha256: b.sha256, validator: VALIDATOR_VERSION, result: b.result ?? 'ok' }])),
+    status,
+    // The drift record is a projection of the `ref.drift` event, never a second fact.
+    ...(drift ? { drift: { acceptedBy: 'flag', refs: drift } } : {}),
+  };
+  fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + '\n');
+  return manifest;
+}
+
+const VALIDATOR_VERSION = 'forge-protocol-v1';
 
 function writeContext(runDir, stage, iteration, ctx) {
   const dir = path.join(runDir, 'context');
@@ -134,14 +282,14 @@ function writeContext(runDir, stage, iteration, ctx) {
   return sha256Hex(body + '\n');
 }
 
-function invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration }) {
+function invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs, checksFile }) {
   const script = path.join(rootDir, 'fixtures', 'fake-runner.js');
   if (!fs.existsSync(script)) {
     return { submit: { v: 1, status: 'ok', artifacts: [], summary: `stub ${stage}`, evidence: [{ check: 'stub', cmd: 'noop', exit: 0 }] } };
   }
   const res = spawnSync(process.execPath, [script, stage], {
     cwd: runDir,
-    env: { ...process.env, FORGE_FAKE: fake ?? '1', FORGE_STAGE: stage, FORGE_ITERATION: String(iteration) },
+    env: { ...process.env, FORGE_FAKE: fake ?? '1', FORGE_STAGE: stage, FORGE_ITERATION: String(iteration), FORGE_EVENTS: path.join(runDir, 'events.jsonl'), FORGE_CHECKS_FILE: checksFile, FORGE_PREV_SEQ: String(prevSeqs) },
     encoding: 'utf8',
   });
   if (res.status === 2) return { crash: true, stderr: res.stderr ?? '' };
@@ -168,4 +316,22 @@ function invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration }) {
     };
   }
   return { submit };
+}
+
+// Forge roots never ship a half-written events.jsonl (A5.9). Runs here are
+// short-lived, so the tail is checked at the end of each append instead of
+// waiting for the next one; a truncation is reported as a warn event.
+function writeWarnIfHalf(writer, runDir, runId, stage) {
+  const repaired = ensureTrailingNewline(writer, runId);
+  if (!repaired) return;
+  writer.append({ run_id: runId, stage, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'log', payload: { severity: 'warn', message: 'trailing partial line truncated before append' } });
+}
+
+function ensureTrailingNewline(writer, runId) {
+  const file = writer.file;
+  const buf = fs.readFileSync(file);
+  if (!buf.length || buf[buf.length - 1] === 0x0a) return false;
+  fs.truncateSync(file, buf.lastIndexOf(0x0a) + 1);
+  writer.sync();
+  return true;
 }

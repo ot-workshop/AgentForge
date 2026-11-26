@@ -5,15 +5,17 @@ import { readEvents } from './eventlog.js';
 import { replayJsonl, snapshot } from './project.js';
 import { runLinear } from './run.js';
 import { createServer } from './serve.js';
-import { validateFlow, loadYamlFile } from './validate.js';
+import { validateFlow, validateP0, loadYamlFile } from './validate.js';
 import { appendEvents } from './append.js';
-import { isStructuredError } from './errors.js';
+import { checkRefs } from './refs.js';
+import { isStructuredError, structuredError } from './errors.js';
 
 const USAGE = `forge <command> [options]
   replay --run <run_id> --format jsonl       全量投影
   incremental --run <run_id> --since <n>     增量投影（严格大于游标）
   verify-chain (--run <id> | --from-events-file <f>) [--json]
   snapshot --run <run_id>                    投影后的状态（JSON）
+  verify --check-refs --run <run_id>         引用漂移检测（A7.2）
   append --run <run_id> --event-file <jsonl>  经锁与哈希链追加事件（A5.3）
   serve [--port <n>]                          Live（/healthz /snapshot /events）
   validate <flow.yaml> [--json]
@@ -60,7 +62,7 @@ function emitErrors(errors, json) {
   else for (const e of errors) process.stderr.write(`${e.code}: ${e.path || ''}\n`);
 }
 
-export function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2)) {
   const { cmd, opts } = parseArgs(argv);
   const json = !!opts.json || opts.format === 'jsonl' ? !!opts.json : false;
   try {
@@ -87,7 +89,7 @@ export function main(argv = process.argv.slice(2)) {
         return 0;
       }
       case 'run': {
-        const res = runLinear({
+        const res = await runLinear({
           rootDir: root(),
           flowPath: opts.flow && opts.flow !== true ? path.resolve(opts.flow) : null,
           fake: process.env.FORGE_FAKE ?? null,
@@ -100,12 +102,32 @@ export function main(argv = process.argv.slice(2)) {
       case 'validate': {
         const file = opts._[0];
         if (!file) throw usageError('validate <flow.yaml>');
-        const doc = loadYamlFile(path.resolve(file));
-        const errors = validateFlow(doc, { file });
+        const abs = path.resolve(file);
+        if (!fs.existsSync(abs)) {
+          const e = {
+            errors: [
+              structuredError({ code: 'E_FILE_NOT_FOUND', severity: 'block', locatable: false, path: abs, ids: [], fix: { action: 'pass an existing file', path: abs } }),
+            ],
+            exitCode: 1,
+          };
+          throw e;
+        }
+        const doc = loadYamlFile(abs);
+        const p0Errors = validateP0(doc, { file });
+        const sev = opts.severity && opts.severity !== true ? String(opts.severity) : null;
+        let errors = p0Errors.length ? p0Errors : validateFlow(doc, { file, p0: false });
+        if (sev) errors = errors.filter((e) => e.severity === sev);
         const block = errors.filter((e) => e.severity === 'block');
         if (json || errors.length) emitErrors(errors, json);
         else process.stdout.write(JSON.stringify({ errors: [] }) + '\n');
         return block.length ? 1 : 0;
+      }
+      case 'verify': {
+        if (!opts['check-refs']) throw usageError('verify --check-refs --run <run_id>');
+        const res = checkRefs({ rootDir: root(), runId: opts.run });
+        if (!res.ok) emitErrors(res.errors, json);
+        else if (json) process.stdout.write(JSON.stringify({ ok: true }) + '\n');
+        return res.ok ? 0 : 1;
       }
       case 'append': {
         const res = appendEvents({ rootDir: root(), runId: opts.run, eventFile: opts['event-file'] });

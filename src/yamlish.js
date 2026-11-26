@@ -75,8 +75,63 @@ function parseScalar(v) {
 }
 
 function parseFlow(v) {
-  const jsonish = v
-    .replace(/([{,]\s*)([A-Za-z0-9_-]+)\s*:/g, '$1"$2":')
-    .replace(/'/g, '"');
-  return JSON.parse(jsonish);
+  // convert a YAML flow value into a JS object without regex quoting games
+  const chars = [...v];
+  let i = 0;
+  const ws = () => {
+    while (chars[i] === ' ' || chars[i] === '\n') i++;
+  };
+  const parseValue = () => {
+    ws();
+    const c = chars[i];
+    if (c === '[') {
+      i++;
+      const arr = [];
+      ws();
+      if (chars[i] === ']') { i++; return arr; }
+      for (;;) {
+        arr.push(parseValue());
+        ws();
+        if (chars[i] === ',') { i++; continue; }
+        if (chars[i] === ']') { i++; return arr; }
+        throw new Error('bad flow array');
+      }
+    }
+    if (c === '{') {
+      i++;
+      const obj = {};
+      ws();
+      if (chars[i] === '}') { i++; return obj; }
+      for (;;) {
+        ws();
+        const key = parseScalarRaw();
+        ws();
+        if (chars[i] !== ':') throw new Error('bad flow map');
+        i++;
+        obj[key] = parseValue();
+        ws();
+        if (chars[i] === ',') { i++; continue; }
+        if (chars[i] === '}') { i++; return obj; }
+        throw new Error('bad flow map');
+      }
+    }
+    if (c === '"' || c === "'") {
+      const q = c;
+      i++;
+      let out = '';
+      while (i < chars.length && chars[i] !== q) { out += chars[i++]; }
+      i++;
+      return out;
+    }
+    return parseScalarRaw();
+  };
+  const parseScalarRaw = () => {
+    ws();
+    let out = '';
+    while (i < chars.length && ![':', ',', '}', ']'].includes(chars[i])) out += chars[i++];
+    return parseScalar(out.trim());
+  };
+  const out = parseValue();
+  if (typeof out === 'object') return out;
+  return out;
 }

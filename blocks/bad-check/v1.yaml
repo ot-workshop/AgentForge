@@ -1,0 +1,10 @@
+id: bad-check
+version: 1
+agent: reviewer@1
+inputs: {}
+outputs:
+  out:
+    type: file
+checks:
+  - name: does-not-exist
+    run: node checks/does-not-exist.mjs

@@ -49,3 +49,12 @@ test('A4.6a append is refused with E_EVENTS_LOCKED while the run lock is held', 
     lock.release();
   }
 });
+
+test('append refuses an empty fragment with E_INVALID_ARGS (never rc=0 appended:[])', () => {
+  const root = workspace();
+  const frag = path.join(root, 'empty.jsonl');
+  fs.writeFileSync(frag, '\n\n');
+  const r = spawnSync(process.execPath, [FORGE, 'append', '--run', 'r1', '--event-file', frag, '--json'], { cwd: root, env: { ...process.env, FORGE_ROOT: root }, encoding: 'utf8' });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /E_INVALID_ARGS/);
+});

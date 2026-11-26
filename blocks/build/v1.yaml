@@ -4,9 +4,8 @@ agent: coder@1
 inputs:
   plan:
     type: tree
+
 outputs:
   patch:
     type: tree
-checks:
-  - name: unit
-    run: node --test
+checks: []

@@ -52,13 +52,42 @@ export function createServer({ rootDir, port = 8787, pollMs = 200 }) {
         }
         since = Number(raw);
       }
+      const allRuns = loadAllRuns(rootDir);
+      const wanted = url.searchParams.get('run');
+      let run = null;
+      if (wanted) {
+        run = allRuns.find((r) => r.id === wanted) ?? null;
+        if (!run) {
+          return sendJson(res, 404, {
+            errors: [
+              structuredError({ code: 'E_UNKNOWN_RUN', severity: 'block', locatable: false, path: 'GET /events?run', ids: [`run:${wanted}`], fix: { action: 'pass a run id listed by GET /snapshot', available: allRuns.map((r) => r.id) } }),
+            ],
+          });
+        }
+      } else {
+        // "Newest run" is the run whose manifest records the latest start
+        // (agentforge-v2.4 §3.1); filesystem mtime is not used as a proxy.
+        const startedAt = (r) => {
+          const m = path.join(rootDir, '.forge', 'runs', r.id, 'manifest.json');
+          try {
+            const j = JSON.parse(fs.readFileSync(m, 'utf8'));
+            return Date.parse(j.run_started_at ?? '') || 0;
+          } catch {
+            return 0;
+          }
+        };
+        run = allRuns.length ? allRuns.reduce((a, b) => (startedAt(b) >= startedAt(a) ? b : a)) : null;
+      }
       const initial = [];
-      for (const item of project(merged(loadAllRuns(rootDir)), since)) initial.push(item);
+      if (run) for (const item of project(run.events, since)) initial.push(item);
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       if (initial.length === 0) return res.end();
       let sent = since;
       const push = () => {
-        for (const item of project(merged(loadAllRuns(rootDir)), sent)) {
+        if (!run) return;
+        const fresh = loadAllRuns(rootDir).find((r) => r.id === run.id);
+        if (!fresh) return;
+        for (const item of project(fresh.events, sent)) {
           sent = item.seq;
           res.write(`data: ${JSON.stringify(item)}\n\n`);
         }

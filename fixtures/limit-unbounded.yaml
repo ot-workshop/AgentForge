@@ -1,0 +1,26 @@
+# P0.5 (A12.3): a retry edge with a suspiciously large bound -> warn, not block
+id: limit-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:test@1
+    with:
+      request: r
+  - id: b
+    uses: block:build@1
+  - id: c
+    uses: block:verify@1
+  - id: d
+    uses: block:ops@1
+edges:
+  - from: a
+    to: b
+  - from: b
+    to: c
+  - from: c
+    to: d
+  - id: c-to-b
+    from: c
+    to: b
+    max_iterations: 100000

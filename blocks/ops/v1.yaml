@@ -1,0 +1,11 @@
+id: ops
+version: 1
+agent: reviewer@1
+inputs:
+  report:
+    type: file
+    required: false
+outputs:
+  merged:
+    type: file
+checks: []

@@ -25,11 +25,26 @@ export function appendEvents({ rootDir, runId, eventFile }) {
       exitCode: 1,
     };
   }
-  const lines = fs
+  const rawLines = fs
     .readFileSync(path.resolve(eventFile), 'utf8')
     .split('\n')
-    .filter((l) => l.trim())
-    .map((l, i) => {
+    .filter((l) => l.trim());
+  if (rawLines.length === 0) {
+    throw {
+      errors: [
+        structuredError({
+          code: 'E_INVALID_ARGS',
+          severity: 'block',
+          locatable: false,
+          path: String(eventFile),
+          ids: [],
+          fix: { action: 'event-file must contain at least one JSON line; an empty file is an argument error, not a no-op' },
+        }),
+      ],
+      exitCode: 1,
+    };
+  }
+  const lines = rawLines.map((l, i) => {
       try {
         const o = JSON.parse(l);
         o.__line = i + 1;

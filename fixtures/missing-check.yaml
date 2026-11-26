@@ -1,0 +1,7 @@
+id: missing-check-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:nope@1
+edges: []

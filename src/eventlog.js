@@ -147,6 +147,13 @@ export class EventWriter {
     return true;
   }
 
+  // Only legal on a freshly created run directory; keeps seq starting at 1.
+  resetChain() {
+    this.events = [];
+    this.prev = GENESIS_PREV;
+    this.nextSeq = 1;
+  }
+
   append(fields) {
     const body = {
       v: 1,

@@ -1,6 +1,24 @@
-# source: docs/error-codes.md (mirrors agentforge-v2.4.md §A3.3) -- keep one truth
+# source: agentforge-v2.md §A3.3
+# doc-only: E_ILLEGAL_JUMP
+# doc-only: E_LIMIT_UNBOUNDED
+broken-yaml.yaml	E_SCHEMA_INVALID
+missing-check.yaml	E_UNKNOWN_REF
 cycle.yaml	E_CYCLE
 unreachable.yaml	E_UNREACHABLE
+missing-entry.yaml	E_MISSING_ENTRY
+missing-exit.yaml	E_MISSING_EXIT
+missing-exit.yaml	E_CYCLE
+contract-mismatch.yaml	E_CONTRACT_MISMATCH
+unbound-input.yaml	E_UNBOUND_INPUT
+permission-gap.yaml	E_PERMISSION_GAP
+checker-not-found.yaml	E_CHECKER_NOT_FOUND
+gate-no-approver.yaml	E_GATE_NO_APPROVER
+fanout-9.yaml	E_FANOUT_EXCEEDED
+nodes-101.yaml	E_NODE_COUNT_EXCEEDED
+depth-4.yaml	E_DEPTH_EXCEEDED
 p0-unsupported-on.yaml	E_P0_UNSUPPORTED
 p0-unsupported-max_iterations.yaml	E_P0_UNSUPPORTED
 p0-unsupported-group.yaml	E_P0_UNSUPPORTED
+p0-unsupported-loop_id.yaml	E_P0_UNSUPPORTED
+illegal-jump.yaml	E_MISSING_EXIT
+illegal-jump.yaml	E_CYCLE

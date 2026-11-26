@@ -8,10 +8,13 @@ import { verifyChain, readEvents } from '../src/eventlog.js';
 import { acquireRunLock } from '../src/lock.js';
 
 const FORGE = new URL('../bin/forge.js', import.meta.url).pathname;
+const REAL_RUNNER = fs.readFileSync(new URL('../fixtures/fake-runner.js', import.meta.url), 'utf8');
 
 function workspace(runnerBody) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-run-'));
   fs.mkdirSync(path.join(root, 'fixtures'), { recursive: true });
+  // Same module mode as the delivered repository: the runner is ESM there too.
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module' }) + '\n');
   fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), runnerBody);
   return root;
 }
@@ -85,4 +88,115 @@ test('A5.8 runner process crash → exit 2, no new error event', () => {
   assert.match(res.stderr, /simulated crash/);
   const { events } = readEvents(path.join(root, '.forge', 'runs', 'r1', 'events.jsonl'));
   assert.ok(!events.some((e) => e.payload?.error));
+});
+
+test('A5.8 crash mid-write: run exits 2, no error event, half line repaired with a warn', () => {
+  const root = workspace(OK_RUNNER);
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  assert.equal(run(root, '1').status, 0);
+  const res = run(root, 'crash-midwrite');
+  assert.equal(res.status, 2, res.stderr + res.stdout);
+  const file = path.join(root, '.forge', 'runs', 'r1', 'events.jsonl');
+  const raw = fs.readFileSync(file, 'utf8');
+  assert.ok(raw.endsWith('\n'), 'a shipped run never ends with a half line');
+  const chain = verifyChain(file);
+  assert.equal(chain.ok, true);
+  assert.equal(chain.trailingPartial, false);
+  assert.ok(!chain.events.some((e) => e.payload?.error));
+  assert.ok(chain.events.some((e) => e.payload?.severity === 'warn' && /truncated/.test(e.payload.message)));
+});
+
+
+
+test('A5.9 a run started on an existing run truncates its half line before appending and records a warn', () => {
+  const root = workspace(OK_RUNNER);
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const file = path.join(root, '.forge', 'runs', 'r2', 'events.jsonl');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{"seq":1,"type":"stage.st');
+  const res = run(root, '1', 'r2');
+  assert.equal(res.status, 0, res.stderr);
+  const { events, trailingPartial } = readEvents(file);
+  assert.equal(trailingPartial, false);
+  assert.ok(events.some((e) => e.payload?.severity === 'warn' && /truncated/.test(e.payload.message)));
+  assert.equal(verifyChain(file).ok, true);
+});
+
+test('A4.4 touch-checks: a runner that modifies the checker file fails the stage', () => {
+  const root = workspace(OK_RUNNER);
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const res = run(root, 'touch-checks');
+  assert.notEqual(res.status, 0);
+  const chain = verifyChain(path.join(root, '.forge', 'runs', 'r1', 'events.jsonl'));
+  const err = chain.events.find((e) => e.payload?.error)?.payload.error;
+  assert.equal(err.code, 'E_PERMISSION_GAP');
+  assert.match(err.path, /checks\.lock/);
+});
+
+test('A7.2 a new run id also refuses when a block changed since the last manifest', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-drift-'));
+  fs.cpSync(new URL('../flows', import.meta.url), path.join(root, 'flows'), { recursive: true });
+  fs.cpSync(new URL('../blocks', import.meta.url), path.join(root, 'blocks'), { recursive: true });
+  fs.cpSync(new URL('../checks', import.meta.url), path.join(root, 'checks'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'fixtures'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const flow = path.join(root, 'flows', 'main.yaml');
+  const runNew = () =>
+    spawnSync(process.execPath, [FORGE, 'run', '--flow', flow], { cwd: root, env: { ...process.env, FORGE_ROOT: root, FORGE_FAKE: '1' }, encoding: 'utf8' });
+  const first = runNew();
+  assert.equal(first.status, 0, first.stderr);
+  const runId = spawnSync('ls', [path.join(root, '.forge', 'runs')], { encoding: 'utf8' }).stdout.trim().split('\n')[0];
+  const mf = path.join(root, '.forge', 'runs', runId, 'manifest.json');
+  assert.ok(fs.existsSync(mf), 'manifest must be written');
+  assert.ok(JSON.parse(fs.readFileSync(mf, 'utf8')).blocks.build, 'manifest must record the build block');
+  fs.appendFileSync(path.join(root, 'blocks', 'build', 'v1.yaml'), '# edited\n');
+  const refused = runNew();
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.match(refused.stderr, /E_BLOCK_CONTENT_DRIFT/);
+});
+
+test('A2.4f manifest.run_started_at equals the run.start event ts', () => {
+  const root = workspace(OK_RUNNER);
+  assert.equal(run(root, '1', 'rs').status, 0);
+  const runDir = path.join(root, '.forge', 'runs', 'rs');
+  const mf = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8'));
+  const first = readEvents(path.join(runDir, 'events.jsonl')).events[0];
+  assert.equal(first.type, 'run.start');
+  assert.equal(mf.run_started_at, first.ts);
+});
+
+test('A4.4 seeded checker file: the write is reverted, not just reported', () => {
+  const root = workspace(OK_RUNNER);
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const runDir = path.join(root, '.forge', 'runs', 'seed');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'checks.lock'), 'original-checker\n');
+  const res = run(root, 'touch-checks', 'seed');
+  assert.equal(res.status, 1, res.stderr);
+  assert.notEqual(fs.readFileSync(path.join(runDir, 'checks.lock'), 'utf8'), 'original-checker\n');
+  assert.notEqual(fs.readFileSync(path.join(runDir, 'checks.lock'), 'utf8'), 'tampered');
+  const chain = verifyChain(path.join(runDir, 'events.jsonl'));
+  const err = chain.events.find((e) => e.payload?.error)?.payload.error;
+  assert.equal(err.code, 'E_PERMISSION_GAP');
+});
+
+test('A5.5 --allow-drift records exactly one ref.drift before the first stage.start', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-drift-ev-'));
+  fs.cpSync(new URL('../flows', import.meta.url), path.join(root, 'flows'), { recursive: true });
+  fs.cpSync(new URL('../blocks', import.meta.url), path.join(root, 'blocks'), { recursive: true });
+  fs.cpSync(new URL('../checks', import.meta.url), path.join(root, 'checks'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'fixtures'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const flow = path.join(root, 'flows', 'main.yaml');
+  const go = (args = []) => spawnSync(process.execPath, [FORGE, 'run', '--flow', flow, ...args], { cwd: root, env: { ...process.env, FORGE_ROOT: root, FORGE_FAKE: '1' }, encoding: 'utf8' });
+  assert.equal(go().status, 0);
+  fs.appendFileSync(path.join(root, 'blocks', 'design', 'v1.yaml'), '# reviewer edit\n');
+  const ok = go(['--run', 'drift1', '--allow-drift']);
+  assert.equal(ok.status, 0, ok.stderr);
+  const { events } = readEvents(path.join(root, '.forge', 'runs', 'drift1', 'events.jsonl'));
+  const drifts = events.filter((e) => e.type === 'ref.drift');
+  assert.equal(drifts.length, 1);
+  const firstStage = events.find((e) => e.type === 'stage.start').seq;
+  assert.ok(drifts[0].seq < firstStage);
+  assert.equal(events[0].type, 'run.start');
 });

@@ -1,14 +1,21 @@
-# A3.3 fixture: a cycle that is not a bounded retry edge
+# A3.3 fixture: a plain cycle whose nodes have a terminal branch, so the only
+# defect is the loop itself (single root cause).
 id: cycle-demo
 version: 1
 entry: a
 nodes:
   - id: a
-    uses: block:build@1
+    uses: block:test@1
+    with:
+      request: r
   - id: b
-    uses: block:verify@1
+    uses: block:ops@1
+  - id: exit
+    uses: block:ops@1
 edges:
   - from: a
     to: b
   - from: b
     to: a
+  - from: a
+    to: exit
