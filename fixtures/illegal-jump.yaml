@@ -1,25 +1,26 @@
+# A3.3: a back edge to a sibling (not an ancestor) is an illegal jump
 id: jump-demo
 version: 1
-entry: a
+entry: start
 nodes:
-  - id: a
+  - id: start
     uses: block:test@1
     with:
       request: r
   - id: b
-    uses: block:build@1
+    uses: block:ops@1
   - id: c
-    uses: block:verify@1
+    uses: block:ops@1
   - id: d
     uses: block:ops@1
 edges:
-  - from: a
+  - from: start
     to: b
   - from: b
     to: c
   - from: c
     to: d
-  - id: d-to-b
-    from: d
+  - from: start
+    to: c
+  - from: d
     to: b
-    max_iterations: 2

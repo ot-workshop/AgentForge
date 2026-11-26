@@ -130,3 +130,25 @@ test('A4.4 touch-checks: a runner that modifies the checker file fails the stage
   assert.equal(err.code, 'E_PERMISSION_GAP');
   assert.match(err.path, /checks\.lock/);
 });
+
+test('A7.2 a new run id also refuses when a block changed since the last manifest', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-drift-'));
+  fs.cpSync(new URL('../flows', import.meta.url), path.join(root, 'flows'), { recursive: true });
+  fs.cpSync(new URL('../blocks', import.meta.url), path.join(root, 'blocks'), { recursive: true });
+  fs.cpSync(new URL('../checks', import.meta.url), path.join(root, 'checks'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'fixtures'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const flow = path.join(root, 'flows', 'main.yaml');
+  const runNew = () =>
+    spawnSync(process.execPath, [FORGE, 'run', '--flow', flow], { cwd: root, env: { ...process.env, FORGE_ROOT: root, FORGE_FAKE: '1' }, encoding: 'utf8' });
+  const first = runNew();
+  assert.equal(first.status, 0, first.stderr);
+  const runId = spawnSync('ls', [path.join(root, '.forge', 'runs')], { encoding: 'utf8' }).stdout.trim().split('\n')[0];
+  const mf = path.join(root, '.forge', 'runs', runId, 'manifest.json');
+  assert.ok(fs.existsSync(mf), 'manifest must be written');
+  assert.ok(JSON.parse(fs.readFileSync(mf, 'utf8')).blocks.build, 'manifest must record the build block');
+  fs.appendFileSync(path.join(root, 'blocks', 'build', 'v1.yaml'), '# edited\n');
+  const refused = runNew();
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.match(refused.stderr, /E_BLOCK_CONTENT_DRIFT/);
+});

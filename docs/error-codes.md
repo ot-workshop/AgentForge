@@ -46,6 +46,7 @@ Uncaught internal crashes are not in this table: exit code 2 + one stderr line.
 | `E_EVENTS_LOCKED` | block | false | `{action}` | runtime | — |
 | `E_INVALID_QUERY` | block | false | `{action}` | runtime | — |
 | `E_FILE_NOT_FOUND` | block | false | `{action, path}` | runtime | — |
+| `E_UNKNOWN_RUN` | block | false | `{action, available[]}` | `GET /events?run=<id>` names a run that does not exist (404) |
 | `E_INVALID_ARGS` | block | false | `{action}` | runtime | — |
 
 ## Error-structure tests (one list, consumed by the validator unit tests)

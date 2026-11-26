@@ -19,8 +19,77 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
   fs.mkdirSync(runsDir, { recursive: true });
   const id = runId ?? new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14) + '-' + Math.random().toString(16).slice(2, 6);
   const runDir = path.join(runsDir, id);
-  fs.mkdirSync(runDir, { recursive: true });
+  const isNewRun = !fs.existsSync(runDir);
+  if (isNewRun) fs.mkdirSync(runDir, { recursive: true });
 
+  // Drift check before anything is written to the run: a refused start leaves
+  // no event and no repair behind (A7.2). Running this before the writer opens
+  // also avoids truncating a half line on a start that will be refused.
+  {
+    const prior = fs.existsSync(path.join(runDir, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8')) : null;
+    if (flowPath && fs.existsSync(flowPath) && prior) {
+      const { checkRefs } = await import('./refs.js');
+      const refs = checkRefs({ rootDir, runId: id });
+      if (!refs.ok && !allowDrift) throw { errors: refs.errors, exitCode: 1 };
+      if (allowDrift && refs.drifts.length) blocks.driftAccepted = refs.drifts;
+    }
+  }
+  // A7.2: a fresh run id must still refuse to start when a block the flow uses
+  // changed since the most recent manifest recorded it.
+  if (flowPath && fs.existsSync(flowPath) && !allowDrift) {
+    let latest = null;
+    let latestAt = '';
+    for (const rid of fs.readdirSync(runsDir)) {
+      const mf = path.join(runsDir, rid, 'manifest.json');
+      if (!fs.existsSync(mf)) continue;
+      try {
+        const j = JSON.parse(fs.readFileSync(mf, 'utf8'));
+        if (path.resolve(j.flow?.path ?? '') !== path.resolve(flowPath)) continue;
+        const at = String(j.run_started_at ?? '');
+        if (at > latestAt) {
+          latestAt = at;
+          latest = j;
+        }
+      } catch {
+        /* an unreadable old manifest cannot be used as evidence */
+      }
+    }
+    if (latest) {
+      const blocksRoot = path.join(path.dirname(flowPath), '..', 'blocks');
+      const drift = [];
+      for (const [nodeId, rec] of Object.entries(latest.blocks ?? {})) {
+        const m = /^block:([a-z][a-z0-9-]*)@([0-9]+)$/.exec(rec.ref ?? '');
+        if (!m) continue;
+        const bf = path.join(blocksRoot, m[1], `v${m[2]}.yaml`);
+        const actual = fs.existsSync(bf) ? sha256Hex(fs.readFileSync(bf)) : null;
+        const current = blocks[nodeId];
+        // `blocks` here is the freshly loaded flow: it carries the *current* sha, so
+        // the comparison must be against the recorded sha, never against it.
+        const recordedOnly = rec.sha256;
+        if (actual !== recordedOnly) drift.push({ nodeId, ref: rec.ref, recordedSha256: recordedOnly, actualSha256: actual });
+      }
+      if (drift.length) {
+        const err = {
+          errors: drift.map((d) =>
+            structuredError({
+              code: 'E_BLOCK_CONTENT_DRIFT',
+              severity: 'block',
+              locatable: false,
+              path: `blocks/${d.ref.slice(6).split('@')[0]}/v${d.ref.split('@')[1]}.yaml`,
+              ids: [d.ref],
+              fix: { action: 'review the edit, then rerun with --allow-drift or restore the recorded content', recordedSha256: d.recordedSha256, actualSha256: d.actualSha256 },
+            }),
+          ),
+          exitCode: 1,
+        };
+        if (!allowDrift) {
+          err.beforeWrite = true;
+          throw err;
+        }
+        blocks.driftAccepted = drift;
+      }
+    }
+  }
   const lock = acquireRunLock(runDir);
   const existing = fs.existsSync(path.join(runDir, 'events.jsonl')) ? readEvents(path.join(runDir, 'events.jsonl')).events : [];
   const _w0 = new EventWriter(runDir, existing).open();
@@ -31,33 +100,12 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
   const notesRun = { run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' } };
   // A resumed run records the (re)start in the same chain instead of replacing it.
   if (existing.length) writer.append({ ...notesRun, type: 'log', payload: { severity: 'info', message: 'resumed existing run' } });
-  if (!tailOk) writer.append({ ...notesRun, type: 'log', payload: { severity: 'warn', message: 'trailing partial line truncated before append' } });
   try {
+    if (!tailOk) writer.append({ ...notesRun, type: 'log', payload: { severity: 'warn', message: 'trailing partial line truncated before append' } });
     writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.start', payload: { flow: flowPath ?? null, fake: fake ?? null } });
-  
-    if (flowPath && fs.existsSync(flowPath) && allowDrift) {
-      const prior = fs.existsSync(path.join(runDir, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8')) : null;
-      if (prior) {
-        const { checkRefs } = await import('./refs.js');
-        const refs = checkRefs({ rootDir, runId: id });
-        const fresh = refs.drifts.filter((d) => !(d.recordedSha256 && (blocks[d.nodeId]?.sha256 === d.actualSha256)));
-        blocks.driftAccepted = refs.drifts;
-        if (fresh.length || refs.drifts.length) {
-          writer.append({ run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'ref.drift', payload: { drift: refs.drifts, acceptedBy: 'flag' } });
-        }
-      }
-    }
-    if (flowPath && fs.existsSync(flowPath) && !allowDrift) {
-      // Refuse to start when a file changed since its recorded hash (A7.2).
-      const prior = fs.existsSync(path.join(runDir, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8')) : null;
-      if (prior) {
-        const { checkRefs } = await import('./refs.js');
-        const refs = checkRefs({ rootDir, runId: id });
-        if (!refs.ok) {
-          const err = { errors: refs.errors, exitCode: 1 };
-          throw err;
-        }
-      }
+    if (blocks.driftAccepted) {
+      writer.append({ run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'ref.drift', payload: { drift: blocks.driftAccepted, acceptedBy: 'flag' } });
+      delete blocks.driftAccepted;
     }
     for (const stage of stages) {
       const iteration = 1;
@@ -74,7 +122,7 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
       const checksFile = path.join(runDir, 'checks.lock');
       fs.writeFileSync(checksFile, JSON.stringify({ stage, iteration }) + '\n');
       const checksShaBefore = sha256Hex(fs.readFileSync(checksFile));
-      const res = invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs: writer.nextSeq - 1, runId: id });
+      const res = invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs: writer.nextSeq - 1, runId: id, checksFile });
       const checksShaAfter = sha256Hex(fs.readFileSync(checksFile));
       if (res.crash) {
         // Runner process died: exit 2, one stderr line, no error event (A5.8).
@@ -193,6 +241,7 @@ function writeManifest(runDir, { runId, flowPath, blocks, status }) {
   const refs = { ...(prev.blocks ?? {}), ...blocks };
   const manifest = {
     run_id: runId,
+    run_started_at: prev.run_started_at ?? new Date().toISOString(),
     flow: flowPath ? { path: flowPath, sha256: fs.existsSync(flowPath) ? sha256Hex(fs.readFileSync(flowPath)) : null } : null,
     // order is fixed: content sha256 -> validator version -> validation result
     blocks: Object.fromEntries(Object.entries(refs).map(([id, b]) => [id, { ref: b.ref, sha256: b.sha256, validator: VALIDATOR_VERSION, result: b.result ?? 'ok' }])),
@@ -213,14 +262,14 @@ function writeContext(runDir, stage, iteration, ctx) {
   return sha256Hex(body + '\n');
 }
 
-function invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs }) {
+function invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs, checksFile }) {
   const script = path.join(rootDir, 'fixtures', 'fake-runner.js');
   if (!fs.existsSync(script)) {
     return { submit: { v: 1, status: 'ok', artifacts: [], summary: `stub ${stage}`, evidence: [{ check: 'stub', cmd: 'noop', exit: 0 }] } };
   }
   const res = spawnSync(process.execPath, [script, stage], {
     cwd: runDir,
-    env: { ...process.env, FORGE_FAKE: fake ?? '1', FORGE_STAGE: stage, FORGE_ITERATION: String(iteration), FORGE_EVENTS: path.join(runDir, 'events.jsonl'), FORGE_PREV_SEQ: String(prevSeqs) },
+    env: { ...process.env, FORGE_FAKE: fake ?? '1', FORGE_STAGE: stage, FORGE_ITERATION: String(iteration), FORGE_EVENTS: path.join(runDir, 'events.jsonl'), FORGE_CHECKS_FILE: checksFile, FORGE_PREV_SEQ: String(prevSeqs) },
     encoding: 'utf8',
   });
   if (res.status === 2) return { crash: true, stderr: res.stderr ?? '' };

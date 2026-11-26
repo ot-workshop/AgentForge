@@ -3,5 +3,5 @@ version: 1
 entry: a
 nodes:
   - id: a
-    uses: block:bad-check@1
+    uses: block:checker-missing@1
 edges: []

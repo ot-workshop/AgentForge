@@ -1,15 +1,19 @@
 id: no-exit-demo
 version: 1
-entry: a
+entry: start
 nodes:
-  - id: a
+  - id: start
     uses: block:test@1
     with:
       request: r
-  - id: b
-    uses: block:build@1
+  - id: loop-a
+    uses: block:ops@1
+  - id: loop-b
+    uses: block:ops@1
 edges:
-  - from: a
-    to: b
-  - from: b
-    to: a
+  - from: start
+    to: loop-a
+  - from: loop-a
+    to: loop-b
+  - from: loop-b
+    to: loop-a

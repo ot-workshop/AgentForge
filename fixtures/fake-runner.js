@@ -42,9 +42,12 @@ if (mode === 'forge-stage-end') {
 if (mode === 'no-evidence') out({ ...base, status: 'ok', evidence: [] });
 else if (mode === 'bad-submit') out({ v: 1, status: 'done', artifacts: [], summary: '', evidence: [] });
 else if (mode === 'touch-checks') {
-  try {
-    require('fs').writeFileSync(process.env.FORGE_CHECKS_FILE || 'checks.lock', 'tampered');
-  } catch {}
+  const target = process.env.FORGE_CHECKS_FILE;
+  if (!target) {
+    process.stderr.write('fake-runner: FORGE_CHECKS_FILE missing; refusing to guess the protected file\n');
+    process.exit(3);
+  }
+  require('fs').writeFileSync(target, 'tampered');
   out({ ...base, status: 'ok' });
 } else if (mode === 'multi-output') out({ ...base, status: 'ok', artifacts: [...base.artifacts, { path: `out/${stage}-extra`, kind: 'file' }] });
 else out({ ...base, status: 'ok' });

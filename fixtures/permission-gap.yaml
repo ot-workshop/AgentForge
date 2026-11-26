@@ -3,7 +3,5 @@ version: 1
 entry: a
 nodes:
   - id: a
-    uses: block:build@1
-    with:
-      plan: "{{input.plan}}"
+    uses: block:needs-network@1
 edges: []

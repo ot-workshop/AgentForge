@@ -62,6 +62,22 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
   }
   if (flow.entry && !ids.has(flow.entry)) errors.push(code('E_UNKNOWN_REF', { locatable: false, path: `${file}#entry`, fix: { ref: flow.entry, refKind: 'node', available: [...ids.keys()] } }));
   const entry = flow.entry ?? nodes[0].id;
+  const forwardClosure = (from, skip) => {
+    const seen = new Set();
+    const stack = [from];
+    while (stack.length) {
+      const cur = stack.pop();
+      for (const e of edges) {
+        if (e === skip || e.from !== cur) continue;
+        if (!seen.has(e.to)) {
+          seen.add(e.to);
+          stack.push(e.to);
+        }
+      }
+    }
+    return seen;
+  };
+
   // reachability
   const seen = new Set([entry]);
   const stack = [entry];
@@ -75,7 +91,16 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
 
   // Seams: every required input must be fed by an upstream output or by `with`.
   // Block outputs are looked up in blocks/<id>/v<n>.yaml next to the flow.
-  const blocksRoot = path.join(path.dirname(path.resolve(file)), '..', 'blocks');
+  const projectRoot = (() => {
+    let dir = path.dirname(path.resolve(file));
+    for (;;) {
+      if (fs.existsSync(path.join(dir, 'blocks'))) return dir;
+      const up = path.dirname(dir);
+      if (up === dir) return path.dirname(path.resolve(file));
+      dir = up;
+    }
+  })();
+  const blocksRoot = path.join(projectRoot, 'blocks');
   const blockOutputs = (uses) => {
     const m = /^block:([a-z][a-z0-9-]*)@([0-9]+)$/.exec(uses ?? '');
     if (!m) return null;
@@ -161,9 +186,16 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
   if (cycle.length) {
     // A cycle whose nodes have a single successor is a plain cycle (E_CYCLE);
     // one with a branch plus an unbounded back edge is E_LIMIT_UNBOUNDED instead.
-    const simple = cycle.every((c) => {
+    const hasExit = nodes.some((n) => (out.get(n.id) ?? []).length === 0);
+    // A loop whose nodes are unique is a plain cycle. Two back edges meeting at
+    // one node (a sibling loop) are jumps and reported as E_ILLEGAL_JUMP instead.
+    const hasTwoBackEdges = cycle.some((c) => {
       const idsInCycle = c.slice(0, -1);
-      return idsInCycle.length === new Set(idsInCycle).size && idsInCycle.every((id) => (out.get(id) ?? []).length <= 1);
+      return idsInCycle.some((id) => idsInCycle.some((t) => t !== id && forwardClosure(id, null).has(t)) && forwardClosure(id, null).has(idsInCycle[(idsInCycle.indexOf(id) + 1) % idsInCycle.length]) === false);
+    });
+    const simple = hasExit && !hasTwoBackEdges && cycle.every((c) => {
+      const idsInCycle = c.slice(0, -1);
+      return idsInCycle.length === new Set(idsInCycle).size;
     });
     if (simple) errors.push(code('E_CYCLE', { path: `${file}#${cycle[0][0]}`, ids: cycle[0], fix: { cycle: cycle[0] } }));
   }
@@ -187,11 +219,33 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
       errors.push(code('E_CYCLE', { path: `${file}#${e.id ?? e.from}`, ids: [e.from], fix: { cycle: [e.from, e.from] } }));
       continue;
     }
-    if (e.on && !ancestors(e.from).has(e.to)) {
+    // A back edge is a legal retry only when its target is upstream of its
+    // source (ignoring the edge itself); every other back edge is a jump.
+    // A back edge (target is downstream of source) is legal only when the target
+    // is also upstream (a bounded retry to an ancestor); forward edges are fine.
+    const backEdge = forwardClosure(e.from, e).has(e.to);
+    const reaches = (() => {
+      const seen = new Set([e.to]);
+      const st = [e.to];
+      while (st.length) {
+        const cur = st.pop();
+        for (const x of edges) {
+          if (x === e || x.from !== cur) continue;
+          if (x.to === e.from) return true;
+          if (!seen.has(x.to)) {
+            seen.add(x.to);
+            st.push(x.to);
+          }
+        }
+      }
+      return false;
+    })();
+    if (backEdge && !reaches) {
       illegalEdges.add(e);
       errors.push(code('E_ILLEGAL_JUMP', { path: `${file}#${e.id ?? e.from}`, ids: [e.from, e.to], fix: { from: e.from, to: e.to } }));
     }
   }
+
   // Contract seams: an edge whose source output does not satisfy the target input type.
   const typeOfOutput = (nodeId, output) => {
     const info = blockOutputs(nodeId && ids.get(nodeId)?.uses);
@@ -255,7 +309,7 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
     }
   }
   // Permissions: a block's required tools must be allowed by its AgentSpec.
-  const agentsDir = path.join(path.dirname(path.resolve(file)), '..', 'agents');
+  const agentsDir = path.join(projectRoot, 'agents');
   for (const n of nodes) {
     const bf = blockInfoFor(n);
     const am = /^([a-z][a-z0-9-]*)@([0-9]+)$/.exec(bf?.agent ?? '');
@@ -281,16 +335,7 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
     }
   }
   // Checkers: every check must name a checker that exists under checks/.
-  const checksDir = (() => {
-    let dir = path.dirname(path.resolve(file));
-    for (;;) {
-      const candidate = path.join(dir, 'checks');
-      if (fs.existsSync(candidate) || fs.existsSync(path.join(dir, 'blocks')) || fs.existsSync(path.join(dir, '.forge'))) return candidate;
-      const up = path.dirname(dir);
-      if (up === dir) return candidate;
-      dir = up;
-    }
-  })();
+  const checksDir = path.join(projectRoot, 'checks');
   const knownChecks = fs.existsSync(checksDir) ? fs.readdirSync(checksDir).map((f) => f.replace(/\.[^.]+$/, '')) : [];
   for (const n of nodes) {
     const bf = blockInfoFor(n);
@@ -308,7 +353,7 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
       errors.push(code('E_UNKNOWN_REF', { locatable: false, path: `${file}#${n.id}.uses`, ids: [n.id], fix: { ref: n.uses ?? null, refKind: 'block', available: [] } }));
       continue;
     }
-    const bf = path.join(path.dirname(path.resolve(file)), '..', 'blocks', m[1], `v${m[2]}.yaml`);
+    const bf = path.join(blocksRoot, m[1], `v${m[2]}.yaml`);
     if (!fs.existsSync(bf)) {
       errors.push(code('E_UNKNOWN_REF', { locatable: false, path: `${file}#${n.id}.uses`, ids: [n.id], fix: { ref: n.uses, refKind: 'block', available: [] } }));
     }
@@ -331,9 +376,15 @@ export function validateFlow(flow, { file = '<flow>', p0 = true } = {}) {
   const structural = new Set(['E_UNBOUND_INPUT', 'E_CONTRACT_MISMATCH', 'E_CHECKER_NOT_FOUND', 'E_PERMISSION_GAP', 'E_LIMIT_UNBOUNDED']);
   if (unique.some((e) => e.code === 'E_SCHEMA_INVALID' || e.code.startsWith('E_P0_'))) return unique;
   if (unique.some((e) => structural.has(e.code))) {
+    // A4.4/A12.4: an illegal jump outranks a cycle (the cycle is its symptom).
+    const jumps = unique.filter((e) => e.code === 'E_ILLEGAL_JUMP');
+    if (jumps.length) return [jumps[0]];
     const structuralOnly = unique.filter((e) => structural.has(e.code));
     return [structuralOnly.reduce((a, b) => (rank(b.code) > rank(a.code) ? b : a))];
   }
+  // Most specific only: a jump outranks the cycle it closes.
+  const jump = unique.find((e) => e.code === 'E_ILLEGAL_JUMP');
+  if (jump) return [jump];
   return unique;
 }
 

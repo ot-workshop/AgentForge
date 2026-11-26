@@ -7,6 +7,4 @@ inputs: {}
 outputs:
   out:
     type: file
-checks:
-  - name: accept
-    run: node checks/accept.mjs
+checks: []

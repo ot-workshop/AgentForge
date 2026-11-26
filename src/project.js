@@ -38,10 +38,11 @@ export function snapshot(events) {
   for (const item of project(events, 0)) {
     let run = runs.get(item.run_id);
     if (!run) {
-      run = { run_id: item.run_id, stages: [], lastSeq: 0 };
+      run = { run_id: item.run_id, run_started_at: null, stages: [], lastSeq: 0 };
       runs.set(item.run_id, run);
     }
     run.lastSeq = item.seq;
+    if (item.type === 'run.start') run.run_started_at = item.ts;
     if (!item.stage) continue;
     const key = `${item.stage}@${item.iteration}`;
     let cell = run.stages.find((s) => s.key === key);
@@ -53,5 +54,9 @@ export function snapshot(events) {
     if (item.type === 'stage.start') cell.status = 'running';
     if (item.type === 'stage.end') cell.status = item.payload?.status ?? 'ended';
   }
-  return { runs: [...runs.values()] };
+  // Runs are listed newest first (agentforge-v2.4 §3.1).
+  const list = [...runs.values()].sort((a, b) =>
+    String(b.run_started_at ?? '').localeCompare(String(a.run_started_at ?? '')),
+  );
+  return { runs: list };
 }
