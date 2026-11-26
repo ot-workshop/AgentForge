@@ -92,17 +92,19 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
   }
   const lock = acquireRunLock(runDir);
   const existing = fs.existsSync(path.join(runDir, 'events.jsonl')) ? readEvents(path.join(runDir, 'events.jsonl')).events : [];
-  const _w0 = new EventWriter(runDir, existing).open();
-  const _rep = _w0.repairTrailingPartial();
-  _w0.close();
-  const tailOk = existing.length > 0 && fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8').endsWith('\n');
+  // Any half-written tail is found from the bytes on disk; never open a temporary
+  // writer here (its constructor may append a resume marker of its own).
+  const _rep = existing.length ? readEvents(path.join(runDir, 'events.jsonl')).trailingPartial : false;
+  const tailOk = existing.length === 0 || fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8').endsWith('\n');
   const writer = new EventWriter(runDir, existing).open();
   const notesRun = { run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' } };
-  // A resumed run records the (re)start in the same chain instead of replacing it.
-  if (existing.length) writer.append({ ...notesRun, type: 'log', payload: { severity: 'info', message: 'resumed existing run' } });
   try {
+    // A resumed run records the (re)start in the same chain instead of replacing it.
+    if (existing.length) writer.append({ ...notesRun, type: 'log', payload: { severity: 'info', message: 'resumed existing run' } });
     if (!tailOk) writer.append({ ...notesRun, type: 'log', payload: { severity: 'warn', message: 'trailing partial line truncated before append' } });
-    writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.start', payload: { flow: flowPath ?? null, fake: fake ?? null } });
+    // A fresh run id with an empty run dir must start at seq 1 (A5.4).
+    if (isNewRun && writer.nextSeq !== 1) writer.resetChain();
+    const runStart = writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.start', payload: { flow: flowPath ?? null, fake: fake ?? null } });
     if (blocks.driftAccepted) {
       writer.append({ run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'ref.drift', payload: { drift: blocks.driftAccepted, acceptedBy: 'flag' } });
       delete blocks.driftAccepted;
@@ -127,7 +129,7 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
       if (res.crash) {
         // Runner process died: exit 2, one stderr line, no error event (A5.8).
         writeWarnIfHalf(writer, runDir, id, stage);
-        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'crashed' });
+        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'crashed', runStartedAt: runStart.ts });
         writer.append({ run_id: id, stage, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'crashed' } });
         const err = new Error(res.stderr.trim().split('\n')[0] || 'runner crashed');
         err.exitCode = 2;
@@ -193,14 +195,14 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
         writeWarnIfHalf(writer, runDir, id, stage);
         writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'failed' } });
         writer.sync();
-        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'failed' });
+        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'failed', runStartedAt: runStart.ts });
         return { exitCode: 1, runId: id, error };
       }
     }
     writeWarnIfHalf(writer, runDir, id, null);
     writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'ok' } });
     writer.sync();
-    writeManifest(runDir, { runId: id, flowPath, blocks, status: 'ok' });
+    writeManifest(runDir, { runId: id, flowPath, blocks, status: 'ok', runStartedAt: runStart.ts });
     return { exitCode: 0, runId: id };
   } finally {
     writer.close();
@@ -235,13 +237,14 @@ function loadFlow(flowPath) {
   return { stages: nodes.map((n) => n.id), blocks };
 }
 
-function writeManifest(runDir, { runId, flowPath, blocks, status }) {
+function writeManifest(runDir, { runId, flowPath, blocks, status, runStartedAt }) {
   const file = path.join(runDir, 'manifest.json');
   const prev = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
   const refs = { ...(prev.blocks ?? {}), ...blocks };
   const manifest = {
     run_id: runId,
-    run_started_at: prev.run_started_at ?? new Date().toISOString(),
+    // Must equal the `run.start` event ts of this run (A2.4f); a resumed run keeps its first one.
+    run_started_at: prev.run_started_at ?? runStartedAt ?? new Date().toISOString(),
     flow: flowPath ? { path: flowPath, sha256: fs.existsSync(flowPath) ? sha256Hex(fs.readFileSync(flowPath)) : null } : null,
     // order is fixed: content sha256 -> validator version -> validation result
     blocks: Object.fromEntries(Object.entries(refs).map(([id, b]) => [id, { ref: b.ref, sha256: b.sha256, validator: VALIDATOR_VERSION, result: b.result ?? 'ok' }])),

@@ -152,3 +152,13 @@ test('A7.2 a new run id also refuses when a block changed since the last manifes
   assert.equal(refused.status, 1, refused.stderr);
   assert.match(refused.stderr, /E_BLOCK_CONTENT_DRIFT/);
 });
+
+test('A2.4f manifest.run_started_at equals the run.start event ts', () => {
+  const root = workspace(OK_RUNNER);
+  assert.equal(run(root, '1', 'rs').status, 0);
+  const runDir = path.join(root, '.forge', 'runs', 'rs');
+  const mf = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8'));
+  const first = readEvents(path.join(runDir, 'events.jsonl')).events[0];
+  assert.equal(first.type, 'run.start');
+  assert.equal(mf.run_started_at, first.ts);
+});
