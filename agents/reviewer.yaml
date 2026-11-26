@@ -1,0 +1,12 @@
+name: reviewer
+version: 1
+identity:
+  role: 验收
+model: { provider: fake, model: fake }
+runtime:
+  runner: fake
+responsibilities:
+  may: [read_artifact, run_check]
+  may_not: [write_src]
+tools:
+  allow: [read_file, run_check]

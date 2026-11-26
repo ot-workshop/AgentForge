@@ -1,0 +1,15 @@
+# Uses exactly one P0.5 field: `on` on an edge.
+id: p0-on-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:build@1
+  - id: b
+    uses: block:verify@1
+edges:
+  - from: a
+    to: b
+    on:
+      from: check.result
+      status: fail

@@ -46,6 +46,18 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
       }
       let status = 'ok';
       let error = null;
+      const ev = res.submit?.evidence;
+      if (!res.illegalEvent && !res.submitError && (!Array.isArray(ev) || ev.length === 0)) {
+        status = 'failed';
+        error = structuredError({
+          code: 'E_MISSING_EVIDENCE',
+          severity: 'block',
+          locatable: false,
+          path: `runs/${id}/events.jsonl#${stage}.submit.evidence`,
+          ids: [`stage:${stage}`],
+          fix: { action: 'attach evidence entries: {check, cmd, exit}' },
+        });
+      }
       if (res.illegalEvent) {
         status = 'failed';
         error = structuredError({
@@ -59,6 +71,8 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
       } else if (res.submitError) {
         status = 'failed';
         error = res.submitError;
+      } else if (status === 'failed') {
+        /* evidence wall already set the error */
       } else if (res.submit.status !== 'ok') {
         status = res.submit.status;
         error = structuredError({

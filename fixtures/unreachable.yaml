@@ -1,0 +1,9 @@
+id: unreachable-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:build@1
+  - id: lonely
+    uses: block:verify@1
+edges: []

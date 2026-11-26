@@ -5,6 +5,8 @@ import { readEvents } from './eventlog.js';
 import { replayJsonl, snapshot } from './project.js';
 import { runLinear } from './run.js';
 import { createServer } from './serve.js';
+import { validateFlow, loadYamlFile } from './validate.js';
+import { appendEvents } from './append.js';
 import { isStructuredError } from './errors.js';
 
 const USAGE = `forge <command> [options]
@@ -12,6 +14,7 @@ const USAGE = `forge <command> [options]
   incremental --run <run_id> --since <n>     增量投影（严格大于游标）
   verify-chain (--run <id> | --from-events-file <f>) [--json]
   snapshot --run <run_id>                    投影后的状态（JSON）
+  append --run <run_id> --event-file <jsonl>  经锁与哈希链追加事件（A5.3）
   serve [--port <n>]                          Live（/healthz /snapshot /events）
   validate <flow.yaml> [--json]
   run --run <run_id> --flow <path>
@@ -93,6 +96,21 @@ export function main(argv = process.argv.slice(2)) {
         });
         if (res.exitCode !== 0 && json && res.error) emitErrors([res.error], true);
         return res.exitCode;
+      }
+      case 'validate': {
+        const file = opts._[0];
+        if (!file) throw usageError('validate <flow.yaml>');
+        const doc = loadYamlFile(path.resolve(file));
+        const errors = validateFlow(doc, { file });
+        const block = errors.filter((e) => e.severity === 'block');
+        if (json || errors.length) emitErrors(errors, json);
+        else process.stdout.write(JSON.stringify({ errors: [] }) + '\n');
+        return block.length ? 1 : 0;
+      }
+      case 'append': {
+        const res = appendEvents({ rootDir: root(), runId: opts.run, eventFile: opts['event-file'] });
+        if (json) process.stdout.write(JSON.stringify(res) + '\n');
+        return 0;
       }
       case 'serve': {
         const port = Number(opts.port ?? process.env.FORGE_PORT ?? 8787);
