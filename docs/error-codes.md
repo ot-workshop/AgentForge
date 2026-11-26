@@ -30,7 +30,7 @@ Uncaught internal crashes are not in this table: exit code 2 + one stderr line.
 | `E_PERMISSION_GAP` | block | true | `{tool, requiredBy, agentSpec, suggestAddTo}` | rule | `fixtures/permission-gap.yaml` |
 | `E_CHECKER_NOT_FOUND` | block | true | `{check, searched[]}` | rule | `fixtures/checker-not-found.yaml` |
 | `E_GATE_NO_APPROVER` | block | true | `{gate}` | rule | `fixtures/gate-no-approver.yaml` |
-| `E_LIMIT_UNBOUNDED` | block / warn | true | `{object, suggestedMax}` | rule | `fixtures/limit-unbounded.yaml` (P0.5 only — bounded retry edges are rejected in P0) |
+| `E_LIMIT_UNBOUNDED` | block / warn | true | `{object, suggestedMax}` | rule | `fixtures/limit-unbounded.yaml` |
 | `E_FANOUT_EXCEEDED` | block | true | `{nodeId, fanout, max}` | rule | `fixtures/fanout-9.yaml` |
 | `E_NODE_COUNT_EXCEEDED` | block | false | `{count, max}` | rule | `fixtures/nodes-101.yaml` |
 | `E_DEPTH_EXCEEDED` | block | false | `{depth, max}` | rule | `fixtures/depth-4.yaml` |
@@ -46,7 +46,7 @@ Uncaught internal crashes are not in this table: exit code 2 + one stderr line.
 | `E_EVENTS_LOCKED` | block | false | `{action}` | runtime | — |
 | `E_INVALID_QUERY` | block | false | `{action}` | runtime | — |
 | `E_FILE_NOT_FOUND` | block | false | `{action, path}` | runtime | — |
-| `E_UNKNOWN_RUN` | block | false | `{action, available[]}` | `GET /events?run=<id>` names a run that does not exist (404) |
+| `E_UNKNOWN_RUN` | block | false | `{action, available[]}` | runtime | — |
 | `E_INVALID_ARGS` | block | false | `{action}` | runtime | — |
 
 ## Error-structure tests (one list, consumed by the validator unit tests)
