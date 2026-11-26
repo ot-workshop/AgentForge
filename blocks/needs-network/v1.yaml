@@ -1,0 +1,12 @@
+id: needs-network
+version: 1
+agent: reviewer@1
+requires:
+  network: true
+inputs: {}
+outputs:
+  out:
+    type: file
+checks:
+  - name: accept
+    run: node checks/accept.mjs

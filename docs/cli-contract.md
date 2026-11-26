@@ -25,4 +25,6 @@ and this file is corrected in the same round.
   `.forge/runs/<id>/context/<stage>@<iteration>.json`,
   `stage.start.payload.contextSha256` = sha256 of that file (trailing newline
   included). The file contains the same `inputs[]` that the event carries.
+- `append --event-file`: an empty file (or only blank lines) is an **argument error**
+  `E_INVALID_ARGS` (exit 1), never a no-op with rc=0 and `appended: []`.
 - `checkResultId`: content-addressed within one run; never relied on across runs.

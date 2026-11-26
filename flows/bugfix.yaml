@@ -1,0 +1,36 @@
+# bug-fix sample (P0.5 execution; P0 only checks that it can be written).
+# test(复现) -> build(修复自测) -> verify(测试验证) -> ops(运维合入)
+# verify --fail(<=2 iterations)--> build   (bounded retry edge back to an ancestor)
+id: bugfix
+version: 1
+entry: test
+nodes:
+  - id: test
+    uses: block:test@1
+    with:
+      request: "{{input.request}}"
+  - id: build
+    uses: block:build@1
+  - id: verify
+    uses: block:verify@1
+  - id: ops
+    uses: block:ops@1
+edges:
+  - from: test
+    to: build
+  - from: build
+    to: verify
+  - id: verify-to-build
+    from: verify
+    to: build
+    on:
+      from: check.result
+      status: fail
+    max_iterations: 2
+    on_exhausted: human_gate:ops-lead
+  - id: verify-to-ops
+    from: verify
+    to: ops
+    on:
+      from: check.result
+      status: pass

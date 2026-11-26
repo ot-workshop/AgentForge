@@ -9,11 +9,12 @@ import { acquireRunLock } from './lock.js';
 import { sha256Hex } from './chain.js';
 import { structuredError } from './errors.js';
 import { canonicalJson } from './canonical.js';
+import { parseYaml } from './yamlish.js';
 
 const DEFAULT_STAGES = ['design', 'build', 'verify'];
 
-export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
-  const stages = loadStages(flowPath);
+export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
+  const { stages, blocks } = loadFlow(flowPath);
   const runsDir = path.join(rootDir, '.forge', 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
   const id = runId ?? new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14) + '-' + Math.random().toString(16).slice(2, 6);
@@ -21,9 +22,43 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
   fs.mkdirSync(runDir, { recursive: true });
 
   const lock = acquireRunLock(runDir);
-  const writer = new EventWriter(runDir, []).open();
+  const existing = fs.existsSync(path.join(runDir, 'events.jsonl')) ? readEvents(path.join(runDir, 'events.jsonl')).events : [];
+  const _w0 = new EventWriter(runDir, existing).open();
+  const _rep = _w0.repairTrailingPartial();
+  _w0.close();
+  const tailOk = existing.length > 0 && fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8').endsWith('\n');
+  const writer = new EventWriter(runDir, existing).open();
+  const notesRun = { run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' } };
+  // A resumed run records the (re)start in the same chain instead of replacing it.
+  if (existing.length) writer.append({ ...notesRun, type: 'log', payload: { severity: 'info', message: 'resumed existing run' } });
+  if (!tailOk) writer.append({ ...notesRun, type: 'log', payload: { severity: 'warn', message: 'trailing partial line truncated before append' } });
   try {
     writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.start', payload: { flow: flowPath ?? null, fake: fake ?? null } });
+  
+    if (flowPath && fs.existsSync(flowPath) && allowDrift) {
+      const prior = fs.existsSync(path.join(runDir, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8')) : null;
+      if (prior) {
+        const { checkRefs } = await import('./refs.js');
+        const refs = checkRefs({ rootDir, runId: id });
+        const fresh = refs.drifts.filter((d) => !(d.recordedSha256 && (blocks[d.nodeId]?.sha256 === d.actualSha256)));
+        blocks.driftAccepted = refs.drifts;
+        if (fresh.length || refs.drifts.length) {
+          writer.append({ run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'ref.drift', payload: { drift: refs.drifts, acceptedBy: 'flag' } });
+        }
+      }
+    }
+    if (flowPath && fs.existsSync(flowPath) && !allowDrift) {
+      // Refuse to start when a file changed since its recorded hash (A7.2).
+      const prior = fs.existsSync(path.join(runDir, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8')) : null;
+      if (prior) {
+        const { checkRefs } = await import('./refs.js');
+        const refs = checkRefs({ rootDir, runId: id });
+        if (!refs.ok) {
+          const err = { errors: refs.errors, exitCode: 1 };
+          throw err;
+        }
+      }
+    }
     for (const stage of stages) {
       const iteration = 1;
       const ctx = { runId: id, stage, iteration, prevArtifacts: [] };
@@ -36,9 +71,15 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
         type: 'stage.start',
         payload: { iteration, inputs: [], contextSha256: contextSha },
       });
-      const res = invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration });
+      const checksFile = path.join(runDir, 'checks.lock');
+      fs.writeFileSync(checksFile, JSON.stringify({ stage, iteration }) + '\n');
+      const checksShaBefore = sha256Hex(fs.readFileSync(checksFile));
+      const res = invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs: writer.nextSeq - 1, runId: id });
+      const checksShaAfter = sha256Hex(fs.readFileSync(checksFile));
       if (res.crash) {
         // Runner process died: exit 2, one stderr line, no error event (A5.8).
+        writeWarnIfHalf(writer, runDir, id, stage);
+        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'crashed' });
         writer.append({ run_id: id, stage, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'crashed' } });
         const err = new Error(res.stderr.trim().split('\n')[0] || 'runner crashed');
         err.exitCode = 2;
@@ -57,8 +98,7 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
           ids: [`stage:${stage}`],
           fix: { action: 'attach evidence entries: {check, cmd, exit}' },
         });
-      }
-      if (res.illegalEvent) {
+      } else if (res.illegalEvent) {
         status = 'failed';
         error = structuredError({
           code: 'E_ILLEGAL_STAGE_WRITE',
@@ -71,9 +111,18 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
       } else if (res.submitError) {
         status = 'failed';
         error = res.submitError;
-      } else if (status === 'failed') {
-        /* evidence wall already set the error */
-      } else if (res.submit.status !== 'ok') {
+      } else if (checksShaBefore !== checksShaAfter) {
+        // Judgment wall: the checker file is read-only to the runner (A4.4).
+        status = 'failed';
+        error = structuredError({
+          code: 'E_PERMISSION_GAP',
+          severity: 'block',
+          locatable: false,
+          path: `runs/${id}/checks.lock`,
+          ids: [`stage:${stage}`],
+          fix: { tool: 'write_checks', requiredBy: 'runner', agentSpec: null, suggestAddTo: 'may_not 冲突' },
+        });
+      } else if (status === 'ok' && res.submit.status !== 'ok') {
         status = res.submit.status;
         error = structuredError({
           code: 'E_STAGE_FAILED',
@@ -93,13 +142,17 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
         payload: { iteration, status, submit: res.submit ?? null, ...(error ? { error } : {}) },
       });
       if (status !== 'ok') {
+        writeWarnIfHalf(writer, runDir, id, stage);
         writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'failed' } });
         writer.sync();
+        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'failed' });
         return { exitCode: 1, runId: id, error };
       }
     }
+    writeWarnIfHalf(writer, runDir, id, null);
     writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'ok' } });
     writer.sync();
+    writeManifest(runDir, { runId: id, flowPath, blocks, status: 'ok' });
     return { exitCode: 0, runId: id };
   } finally {
     writer.close();
@@ -118,12 +171,38 @@ export function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
   }
 }
 
-function loadStages(flowPath) {
-  if (!flowPath || !fs.existsSync(flowPath)) return DEFAULT_STAGES;
-  const text = fs.readFileSync(flowPath, 'utf8');
-  const names = [...text.matchAll(/^\s*-\s*(?:id:\s*)?([A-Za-z0-9_-]+)\s*$/gm)].map((m) => m[1]);
-  return names.length ? names : DEFAULT_STAGES;
+function loadFlow(flowPath) {
+  if (!flowPath || !fs.existsSync(flowPath)) return { stages: DEFAULT_STAGES, blocks: {} };
+  const doc = parseYaml(fs.readFileSync(flowPath, 'utf8'), flowPath);
+  if (Array.isArray(doc)) return { stages: doc, blocks: {} };
+  const nodes = doc.nodes ?? [];
+  const blocksRoot = path.join(path.dirname(flowPath), '..', 'blocks');
+  const blocks = {};
+  for (const n of nodes) {
+    const m = /^block:([a-z][a-z0-9-]*)@([0-9]+)$/.exec(n.uses ?? '');
+    if (!m) continue;
+    const f = path.join(blocksRoot, m[1], `v${m[2]}.yaml`);
+    blocks[n.id] = { ref: n.uses, sha256: fs.existsSync(f) ? sha256Hex(fs.readFileSync(f)) : null, file: f, with: n.with ?? {} };
+  }
+  return { stages: nodes.map((n) => n.id), blocks };
 }
+
+function writeManifest(runDir, { runId, flowPath, blocks, status }) {
+  const file = path.join(runDir, 'manifest.json');
+  const prev = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  const refs = { ...(prev.blocks ?? {}), ...blocks };
+  const manifest = {
+    run_id: runId,
+    flow: flowPath ? { path: flowPath, sha256: fs.existsSync(flowPath) ? sha256Hex(fs.readFileSync(flowPath)) : null } : null,
+    // order is fixed: content sha256 -> validator version -> validation result
+    blocks: Object.fromEntries(Object.entries(refs).map(([id, b]) => [id, { ref: b.ref, sha256: b.sha256, validator: VALIDATOR_VERSION, result: b.result ?? 'ok' }])),
+    status,
+  };
+  fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + '\n');
+  return manifest;
+}
+
+const VALIDATOR_VERSION = 'forge-protocol-v1';
 
 function writeContext(runDir, stage, iteration, ctx) {
   const dir = path.join(runDir, 'context');
@@ -134,14 +213,14 @@ function writeContext(runDir, stage, iteration, ctx) {
   return sha256Hex(body + '\n');
 }
 
-function invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration }) {
+function invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs }) {
   const script = path.join(rootDir, 'fixtures', 'fake-runner.js');
   if (!fs.existsSync(script)) {
     return { submit: { v: 1, status: 'ok', artifacts: [], summary: `stub ${stage}`, evidence: [{ check: 'stub', cmd: 'noop', exit: 0 }] } };
   }
   const res = spawnSync(process.execPath, [script, stage], {
     cwd: runDir,
-    env: { ...process.env, FORGE_FAKE: fake ?? '1', FORGE_STAGE: stage, FORGE_ITERATION: String(iteration) },
+    env: { ...process.env, FORGE_FAKE: fake ?? '1', FORGE_STAGE: stage, FORGE_ITERATION: String(iteration), FORGE_EVENTS: path.join(runDir, 'events.jsonl'), FORGE_PREV_SEQ: String(prevSeqs) },
     encoding: 'utf8',
   });
   if (res.status === 2) return { crash: true, stderr: res.stderr ?? '' };
@@ -168,4 +247,22 @@ function invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration }) {
     };
   }
   return { submit };
+}
+
+// Forge roots never ship a half-written events.jsonl (A5.9). Runs here are
+// short-lived, so the tail is checked at the end of each append instead of
+// waiting for the next one; a truncation is reported as a warn event.
+function writeWarnIfHalf(writer, runDir, runId, stage) {
+  const repaired = ensureTrailingNewline(writer, runId);
+  if (!repaired) return;
+  writer.append({ run_id: runId, stage, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'log', payload: { severity: 'warn', message: 'trailing partial line truncated before append' } });
+}
+
+function ensureTrailingNewline(writer, runId) {
+  const file = writer.file;
+  const buf = fs.readFileSync(file);
+  if (!buf.length || buf[buf.length - 1] === 0x0a) return false;
+  fs.truncateSync(file, buf.lastIndexOf(0x0a) + 1);
+  writer.sync();
+  return true;
 }
