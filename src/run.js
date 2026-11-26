@@ -35,12 +35,17 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
       const { checkRefs } = await import('./refs.js');
       const refs = checkRefs({ rootDir, runId: id });
       if (!refs.ok && !allowDrift) throw { errors: refs.errors, exitCode: 1 };
-      if (allowDrift && refs.drifts.length) blocks.driftAccepted = refs.drifts;
+      if (allowDrift && refs.drifts.length) driftAccepted = refs.drifts;
     }
   }
+  // Drift accepted under --allow-drift; carried in a local so the `ref.drift`
+  // event does not depend on a temporary field of `blocks` (A5.5).
+  let driftAccepted = null;
   // A7.2: a fresh run id must still refuse to start when a block the flow uses
   // changed since the most recent manifest recorded it.
-  if (flowPath && fs.existsSync(flowPath) && !allowDrift) {
+  // `allowDrift` only decides what to do with a detected drift (throw or record
+  // `ref.drift`); detection itself must always run (A7.2/A5.5).
+  if (flowPath && fs.existsSync(flowPath)) {
     let latest = null;
     let latestAt = '';
     for (const rid of fs.readdirSync(runsDir)) {
@@ -90,7 +95,7 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
           err.beforeWrite = true;
           throw err;
         }
-        blocks.driftAccepted = drift;
+        driftAccepted = drift;
       }
     }
   }
@@ -109,9 +114,8 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
     // A fresh run id with an empty run dir must start at seq 1 (A5.4).
     if (isNewRun && writer.nextSeq !== 1) writer.resetChain();
     const runStart = writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.start', payload: { flow: flowPath ?? null, fake: fake ?? null } });
-    if (blocks.driftAccepted) {
-      writer.append({ run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'ref.drift', payload: { drift: blocks.driftAccepted, acceptedBy: 'flag' } });
-      delete blocks.driftAccepted;
+    if (driftAccepted) {
+      writer.append({ run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'ref.drift', payload: { drift: driftAccepted, acceptedBy: 'flag' } });
     }
     for (const stage of stages) {
       const iteration = 1;
@@ -140,7 +144,7 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
       if (res.crash) {
         // Runner process died: exit 2, one stderr line, no error event (A5.8).
         writeWarnIfHalf(writer, runDir, id, stage);
-        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'crashed', runStartedAt: runStart.ts });
+        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'crashed', runStartedAt: runStart.ts, drift: driftAccepted });
         writer.append({ run_id: id, stage, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'crashed' } });
         const err = new Error(res.stderr.trim().split('\n')[0] || 'runner crashed');
         err.exitCode = 2;
@@ -206,14 +210,14 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
         writeWarnIfHalf(writer, runDir, id, stage);
         writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'failed' } });
         writer.sync();
-        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'failed', runStartedAt: runStart.ts });
+        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'failed', runStartedAt: runStart.ts, drift: driftAccepted });
         return { exitCode: 1, runId: id, error };
       }
     }
     writeWarnIfHalf(writer, runDir, id, null);
     writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'ok' } });
     writer.sync();
-    writeManifest(runDir, { runId: id, flowPath, blocks, status: 'ok', runStartedAt: runStart.ts });
+    writeManifest(runDir, { runId: id, flowPath, blocks, status: 'ok', runStartedAt: runStart.ts, drift: driftAccepted });
     return { exitCode: 0, runId: id };
   } finally {
     writer.close();
@@ -248,7 +252,7 @@ function loadFlow(flowPath) {
   return { stages: nodes.map((n) => n.id), blocks };
 }
 
-function writeManifest(runDir, { runId, flowPath, blocks, status, runStartedAt }) {
+function writeManifest(runDir, { runId, flowPath, blocks, status, runStartedAt, drift }) {
   const file = path.join(runDir, 'manifest.json');
   const prev = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
   const refs = { ...(prev.blocks ?? {}), ...blocks };
@@ -260,6 +264,8 @@ function writeManifest(runDir, { runId, flowPath, blocks, status, runStartedAt }
     // order is fixed: content sha256 -> validator version -> validation result
     blocks: Object.fromEntries(Object.entries(refs).map(([id, b]) => [id, { ref: b.ref, sha256: b.sha256, validator: VALIDATOR_VERSION, result: b.result ?? 'ok' }])),
     status,
+    // The drift record is a projection of the `ref.drift` event, never a second fact.
+    ...(drift ? { drift: { acceptedBy: 'flag', refs: drift } } : {}),
   };
   fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + '\n');
   return manifest;

@@ -179,3 +179,24 @@ test('A4.4 seeded checker file: the write is reverted, not just reported', () =>
   const err = chain.events.find((e) => e.payload?.error)?.payload.error;
   assert.equal(err.code, 'E_PERMISSION_GAP');
 });
+
+test('A5.5 --allow-drift records exactly one ref.drift before the first stage.start', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-drift-ev-'));
+  fs.cpSync(new URL('../flows', import.meta.url), path.join(root, 'flows'), { recursive: true });
+  fs.cpSync(new URL('../blocks', import.meta.url), path.join(root, 'blocks'), { recursive: true });
+  fs.cpSync(new URL('../checks', import.meta.url), path.join(root, 'checks'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'fixtures'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), REAL_RUNNER);
+  const flow = path.join(root, 'flows', 'main.yaml');
+  const go = (args = []) => spawnSync(process.execPath, [FORGE, 'run', '--flow', flow, ...args], { cwd: root, env: { ...process.env, FORGE_ROOT: root, FORGE_FAKE: '1' }, encoding: 'utf8' });
+  assert.equal(go().status, 0);
+  fs.appendFileSync(path.join(root, 'blocks', 'design', 'v1.yaml'), '# reviewer edit\n');
+  const ok = go(['--run', 'drift1', '--allow-drift']);
+  assert.equal(ok.status, 0, ok.stderr);
+  const { events } = readEvents(path.join(root, '.forge', 'runs', 'drift1', 'events.jsonl'));
+  const drifts = events.filter((e) => e.type === 'ref.drift');
+  assert.equal(drifts.length, 1);
+  const firstStage = events.find((e) => e.type === 'stage.start').seq;
+  assert.ok(drifts[0].seq < firstStage);
+  assert.equal(events[0].type, 'run.start');
+});
