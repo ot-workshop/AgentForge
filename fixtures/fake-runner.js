@@ -8,6 +8,8 @@
 //   crash-midwrite   leaves a half line in events.jsonl, then exits 2
 //   fail-<stage>     that stage submits `failed`, all others succeed
 //   multi-output     two artifacts (subflow case, P0.5)
+import { appendFileSync, writeFileSync } from 'node:fs';
+
 const stage = process.argv[2] || process.env.FORGE_STAGE || 'stage';
 const mode = process.env.FORGE_FAKE || '1';
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
@@ -23,7 +25,7 @@ if (crashMode) {
   if (mode === 'crash-midwrite') {
     // Write a half line straight into events.jsonl, then die (A5.8/A5.11).
     const f = process.env.FORGE_EVENTS;
-    if (f) require('fs').appendFileSync(f, '{"seq":' + (Number(process.env.FORGE_PREV_SEQ) + 1) + ',"type":"stage.st');
+    if (f) writeFileSync(f, '{"seq":' + (Number(process.env.FORGE_PREV_SEQ) + 1) + ',"type":"stage.st', { flag: 'a' });
     process.stderr.write('fake-runner: simulated crash mid-write\n');
   } else process.stderr.write('fake-runner: simulated crash\n');
   process.exit(2);
@@ -31,7 +33,7 @@ if (crashMode) {
 if (mode === 'crash-midwrite') {
   // Write a half line straight into events.jsonl, then die (A5.8/A5.11).
   const f = process.env.FORGE_EVENTS;
-  if (f) require('fs').appendFileSync(f, '{"seq":' + (Number(process.env.FORGE_PREV_SEQ) + 1) + ',"type":"stage.st');
+  if (f) appendFileSync(f, '{"seq":' + (Number(process.env.FORGE_PREV_SEQ) + 1) + ',"type":"stage.st');
   process.stderr.write('fake-runner: simulated crash mid-write\n');
   process.exit(2);
 }
@@ -47,7 +49,7 @@ else if (mode === 'touch-checks') {
     process.stderr.write('fake-runner: FORGE_CHECKS_FILE missing; refusing to guess the protected file\n');
     process.exit(3);
   }
-  require('fs').writeFileSync(target, 'tampered');
+  writeFileSync(target, 'tampered');
   out({ ...base, status: 'ok' });
 } else if (mode === 'multi-output') out({ ...base, status: 'ok', artifacts: [...base.artifacts, { path: `out/${stage}-extra`, kind: 'file' }] });
 else out({ ...base, status: 'ok' });

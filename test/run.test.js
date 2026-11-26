@@ -13,6 +13,8 @@ const REAL_RUNNER = fs.readFileSync(new URL('../fixtures/fake-runner.js', import
 function workspace(runnerBody) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-run-'));
   fs.mkdirSync(path.join(root, 'fixtures'), { recursive: true });
+  // Same module mode as the delivered repository: the runner is ESM there too.
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module' }) + '\n');
   fs.writeFileSync(path.join(root, 'fixtures', 'fake-runner.js'), runnerBody);
   return root;
 }
