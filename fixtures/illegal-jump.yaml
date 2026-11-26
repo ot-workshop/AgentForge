@@ -1,4 +1,8 @@
-# A3.3: a back edge to a sibling (not an ancestor) is an illegal jump
+# A3.3: the shape 员工三号's validator called an illegal jump (a back edge to a
+# sibling branch). A back edge u -> v always has v reaching u, so v is an
+# ancestor of u: E_ILLEGAL_JUMP has no P0 trigger source (v2.4 A12.4 [P0.5],
+# 员工一号 57cfe581). The file stays as the P0.5 case; in P0 its code SET is
+# {E_MISSING_EXIT, E_CYCLE}, which is what the tsv registers.
 id: jump-demo
 version: 1
 entry: start
