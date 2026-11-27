@@ -192,13 +192,18 @@ function canvasRoute(req, res, url, { rootDir, uiDir }) {
   return false;
 }
 
-// `path` is display-only and must stay a plain relative file name: no NUL or
-// line breaks, no absolute/drive path, no `..` segment. Anything else is 400.
+// `path` is display-only: it is copied into the returned error objects and
+// never used as a file name (the temp file has a random name under
+// os.tmpdir()). It still must not be absurd: NUL, CR/LF, a `..` segment or
+// more than MAX_PATH_CHARS bytes are 400. `/` and absolute-looking paths are
+// allowed so the CLI and this route can be compared on the same string.
+export const MAX_PATH_CHARS = 1024;
+
 export function pathProblem(p) {
   if (typeof p !== 'string' || p === '') return 'must be a non-empty string';
   if (p.includes('\0') || /[\r\n]/.test(p)) return 'must not contain NUL or line breaks';
-  if (p.startsWith('/') || /^[A-Za-z]:/.test(p) || /^[\\/]/.test(p)) return 'must be relative';
-  if (p.split(/[\\/]/).includes('..')) return 'must not contain ..';
+  if (p.replace(/\\/g, '/').split('/').includes('..')) return 'must not contain ..';
+  if (Buffer.byteLength(p, 'utf8') > MAX_PATH_CHARS) return `must be at most ${MAX_PATH_CHARS} bytes`;
   return null;
 }
 

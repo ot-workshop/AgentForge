@@ -18,15 +18,16 @@ const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
 function cliValidate(yamlText, name, projectRoot = ROOT, dir = null, cwd = projectRoot) {
   const own = !dir;
   dir = dir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'forge-cli-'));
-  fs.mkdirSync(path.join(dir, path.dirname(name)), { recursive: true });
-  const file = path.join(dir, name);
+  const abs = path.isAbsolute(name);
+  if (!abs) fs.mkdirSync(path.join(dir, path.dirname(name)), { recursive: true });
+  const file = abs ? name : path.join(dir, name);
   fs.writeFileSync(file, yamlText);
   try {
     // `name` is the CLI argument and the file's path under `dir`: same
     // relative string under the same root, so error `path`s render identically.
     // The CLI prints nothing on clean input; on errors it prints the same
     // `{"errors":[…]}` the server returns (the test reads whichever came).
-    const r = spawnSync(process.execPath, [FORGE, 'validate', path.relative(cwd, file), '--json'], { cwd, encoding: 'utf8' });
+    const r = spawnSync(process.execPath, [FORGE, 'validate', file, '--json'], { cwd, encoding: 'utf8' });
     const out = r.stdout.trim() || r.stderr.trim();
     return out ? JSON.parse(out) : { errors: [] };
   } finally {
@@ -150,9 +151,7 @@ test('C2 the server accepts the export of a valid sample', async () => {
   });
 });
 
-test('C2/C3 /validate is byte-identical to the CLI on the same file (path included)', async () => {
-  // The `path` sent is relative to the server's root; the CLI copy is created
-  // at the same relative path under a fresh WORK copy (see `cliValidate`).
+test('C2/C3 /validate is byte-identical to the CLI on the same file (absolute path included)', async () => {
   await withServer(async (port) => {
     const flow = parseFlow(read('flows/main.yaml'));
     const cases = {
@@ -160,24 +159,15 @@ test('C2/C3 /validate is byte-identical to the CLI on the same file (path includ
       'cycle.yaml': exportFlow(withEdge(flow, flow.nodes[0].id, flow.nodes[0].id)),
       'unbound.yaml': exportFlow(withEdge(emptyFlowWith('design'), 'design', 'design', 'self')),
     };
-    // `forge validate` finds `blocks/` from its cwd; run it from inside the
-    // project the server validates against. The cwd is shared with the other
-    // tests in this file, so it is restored in `finally`.
-    const prev = process.cwd();
-    process.chdir(WORK_DIR);
-    try {
-      for (const [name, yaml] of Object.entries(cases)) {
-        // Both sides see a file outside the project root: the server's copy is
-        // in os.tmpdir(), the CLI copy in its own temp dir. `path` is the same
-        // string for both, so the JSON (path included) compares exactly.
-        const rel = path.join('flows', name);
-        const cli = cliValidate(yaml, rel, WORK, WORK_DIR, WORK_DIR);
-        const r = await request(port, { method: 'POST', p: '/validate', body: JSON.stringify({ flow: yaml, path: rel }) });
-        assert.equal(r.status, 200, name);
-        assert.equal(r.body.trim(), JSON.stringify(cli).trim(), name);
-      }
-    } finally {
-      process.chdir(prev);
+    for (const [name, yaml] of Object.entries(cases)) {
+      // The CLI copy is written at an absolute path inside a real temp dir
+      // (`<tmp>/flows/<name>`) so `blocks/` resolves from its path; the same
+      // absolute string is sent to /validate, which only displays it.
+      const sent = path.join(WORK_DIR, name);
+      const cli = cliValidate(yaml, sent, WORK, WORK_DIR, WORK_DIR);
+      const r = await request(port, { method: 'POST', p: '/validate', body: JSON.stringify({ flow: yaml, path: sent }) });
+      assert.equal(r.status, 200, name);
+      assert.equal(r.body.trim(), JSON.stringify(cli).trim(), `${name}: absolute path, JSON identical`);
     }
   });
 });
@@ -223,7 +213,9 @@ test('validation method and payload limits', async () => {
     assert.equal(notJson.status, 400);
     assert.equal(JSON.parse(notJson.body).errors[0].code, 'E_INVALID_ARGS');
 
-    for (const p of ['../x.yaml', '/etc/passwd', 'a/../../b', 'x\u0000y', 'C:\\x']) {
+    // Display-only: `/` and absolute paths are fine; `..`, NUL/line breaks and
+    // more than 1024 bytes are not.
+    for (const p of ['../x.yaml', 'a/../../b', 'x\u0000y', 'a\nb.yaml', 'x'.repeat(1025)]) {
       const r = await request(port, { method: 'POST', p: '/validate', body: JSON.stringify({ flow: 'nodes: []\n', path: p }) });
       assert.equal(r.status, 400, p);
     }
