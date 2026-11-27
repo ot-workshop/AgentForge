@@ -1,6 +1,8 @@
-// Minimal linear-flow runner: design → build → verify.
-// Stages run sequentially from a stage list; the fake runner stands in for a
-// real agent until M2. Every state change is written by the orchestrator only.
+// Flow runner: a walk over the flow's edges (design → build → verify for the
+// default chain). `on` edges branch, a bounded back edge writes `flow.goto`
+// and re-enters its target with the loop's iteration. The fake runner stands
+// in for a real agent until M2. Every state change is written by the
+// orchestrator only.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync, spawn as spawnRuntime } from 'node:child_process';
@@ -10,6 +12,8 @@ import { sha256Hex } from './chain.js';
 import { structuredError } from './errors.js';
 import { canonicalJson } from './canonical.js';
 import { parseYaml } from './yamlish.js';
+import { backEdgesOfScc, validateFlow, validateP0 } from './validate.js';
+import { stronglyConnectedIds } from './graph.js';
 
 const DEFAULT_STAGES = ['design', 'build', 'verify'];
 // Checker definitions live in the run dir and are read-only to the runner (A4.4).
@@ -57,6 +61,20 @@ export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, all
     };
   }
   const { stages, blocks, doc } = loadFlow(flowPath);
+  // A flow `validate` refuses is never run (#流水线:#10): an unbounded loop is
+  // E_CYCLE, not an endless walk. `run` only accepts a flow the validator
+  // lets through, judged the way the CLI's `validate` judges it — before the
+  // run dir, the lock or any event exists.
+  if (doc && flowPath) {
+    const found = [...validateP0(doc, { file: flowRecord ?? flowPath })];
+    // Same project root the CLI's `validate` uses: FORGE_ROOT (what `run` was
+    // given) when set, else the nearest directory with `blocks/`.
+    if (!found.length) {
+      const projectDir = process.env.FORGE_ROOT ? path.resolve(process.env.FORGE_ROOT) : findProjectDir(path.dirname(flowPath), rootDir);
+      found.push(...validateFlow(doc, { file: flowRecord ?? flowPath, p0: false, projectDir }));
+    }
+    if (found.length) return { exitCode: 1, runId: runId ?? null, beforeWrite: true, error: found[0] };
+  }
   // M2-B: the real runtime may only replace a stage the flow actually has.
   if (runtime && !stages.includes(runtime.stage)) {
     return {
@@ -168,9 +186,30 @@ export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, all
     if (driftAccepted) {
       writer.append({ run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'ref.drift', payload: { drift: driftAccepted, acceptedBy: 'flag' } });
     }
-    for (const stage of stages) {
-      const iteration = 1;
-      const ctx = { runId: id, stage, iteration, prevArtifacts: [] };
+    // Graph execution (#流水线:#10): the stage loop is a walk over the flow's
+    // edges. Each step writes stage.start → stage.end, then picks the next edge
+    // (an `on` edge named by the submit's outcome first, then a plain edge, file
+    // order among equals). The two counters never derive from each other
+    // (员工一号 4196b43d / 9d71bd96):
+    //   gotoCount[loopId]  how often this back edge fired — `flow.goto.iteration`
+    //   visitCount[stageId] how often this stage was entered — `stage.start.iteration`
+    // A back edge (the validator's own rule, `backEdgesOfScc`) is judged only at
+    // the moment it is taken: if the next goto would exceed max, no goto is
+    // written and the target is not entered — the run ends right here, after the
+    // stage.end of the turn that just finished (第 3 次不写 stage.start/stage.end).
+    const graph = buildGraph(doc, stages);
+    const ctxChain = new Map();
+    const gotoCount = new Map();
+    const visitCount = new Map();
+    let cursor = graph.entry;
+    let pending = null; // the edge that brought us to `cursor`, if any
+    for (;;) {
+      const stage = cursor;
+      const visited = (visitCount.get(stage) ?? 0) + 1;
+      visitCount.set(stage, visited);
+      const iteration = visited;
+      const prevArtifacts = pending ? (ctxChain.get(pending.from) ?? []) : [];
+      const ctx = { runId: id, stage, iteration, prevArtifacts };
       const contextSha = writeContext(runDir, stage, iteration, ctx);
       writer.append({
         run_id: id,
@@ -210,74 +249,92 @@ export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, all
         err.exitCode = 2;
         throw err;
       }
-      let status = 'ok';
-      let error = null;
-      const ev = res.submit?.evidence;
-      // A real runtime's classified error (E_RUNTIME_*, E_SCHEMA_INVALID from
-      // its Submit check) is recorded as-is instead of being re-wrapped.
-      if (res.submitError) {
-        status = 'failed';
-        error = res.submitError;
-      } else if (!res.illegalEvent && (!Array.isArray(ev) || ev.length === 0)) {
-        status = 'failed';
-        error = structuredError({
-          code: 'E_MISSING_EVIDENCE',
-          severity: 'block',
-          locatable: false,
-          path: `runs/${id}/events.jsonl#${stage}.submit.evidence`,
-          ids: [`stage:${stage}`],
-          fix: { action: 'attach evidence entries: {check, cmd, exit}' },
-        });
-      } else if (res.illegalEvent) {
-        status = 'failed';
-        error = structuredError({
-          code: 'E_ILLEGAL_STAGE_WRITE',
-          severity: 'block',
-          locatable: false,
-          path: `flows/${flowRecord}#${stage}`,
-          ids: [`stage:${stage}`],
-          fix: { action: 'events must be written through the orchestrator, not by the runner' },
-        });
-      } else if (res.submitError) {
-        status = 'failed';
-        error = res.submitError;
-      } else if (checksWritten) {
-        // Judgment wall: the checker file is read-only to the runner (A4.4).
-        status = 'failed';
-        error = structuredError({
-          code: 'E_PERMISSION_GAP',
-          severity: 'block',
-          locatable: false,
-          path: `runs/${id}/checks.lock`,
-          ids: [`stage:${stage}`],
-          fix: { tool: 'write_checks', requiredBy: 'runner', agentSpec: null, suggestAddTo: 'may_not 冲突' },
-        });
-      } else if (status === 'ok' && res.submit.status !== 'ok') {
-        status = res.submit.status;
-        error = structuredError({
-          code: 'E_STAGE_FAILED',
-          severity: 'block',
-          locatable: false,
-          path: `runs/${id}/events.jsonl#${stage}`,
-          ids: [`stage:${stage}`],
-          fix: { action: 'retry-stage', hint: res.submit.next_hint ?? null },
-        });
-      }
+      const judged = judgeSubmit({ res, checksWritten, id, stage, flowRecord });
       writer.append({
         run_id: id,
         stage,
         iteration,
         actor: { kind: 'orchestrator', name: 'forge' },
         type: 'stage.end',
-        payload: { iteration, status, submit: res.submit ?? null, ...(error ? { error } : {}) },
+        payload: { iteration, status: judged.status, submit: res.submit ?? null, ...(judged.error ? { error: judged.error } : {}) },
       });
-      if (status !== 'ok') {
-        writeWarnIfHalf(writer, runDir, id, stage);
-        writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'failed' } });
-        writer.sync();
-        writeManifest(runDir, { runId: id, flowPath, flowRecord, blocks, status: 'failed', runStartedAt: runStart.ts, drift: driftAccepted });
-        return { exitCode: 1, runId: id, error };
+      ctxChain.set(stage, Array.isArray(res.submit?.artifacts) ? res.submit.artifacts.filter((a) => a && typeof a.path === 'string').map((a) => a.path) : []);
+      const out = graph.out.get(stage) ?? [];
+      const taken = pickEdge(out, judged.status, res.submit?.status);
+      if (taken) taken.edge = taken.raw;
+      if (!taken) {
+        // A dead end: a failed stage with nowhere to go ends the run like any
+        // other failure; an ok stage stops the walk.
+        if (judged.status !== 'ok') {
+          writeWarnIfHalf(writer, runDir, id, stage);
+          writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'failed' } });
+          writer.sync();
+          writeManifest(runDir, { runId: id, flowPath, flowRecord, blocks, status: 'failed', runStartedAt: runStart.ts, drift: driftAccepted });
+          return { exitCode: 1, runId: id, error: judged.error };
+        }
+        // The old bare stage list has no edges: it moves on in file order.
+        const next = graph.linear ? graph.nodes[graph.nodes.indexOf(stage) + 1] : null;
+        if (next == null) break;
+        pending = null;
+        cursor = next;
+        continue;
       }
+      if (taken.backEdge) {
+        const loopId = taken.edge.id ?? `${taken.edge.from}->${taken.edge.to}`;
+        const used = gotoCount.get(loopId) ?? 0;
+        const limit = Number.isInteger(taken.edge.max_iterations) && taken.edge.max_iterations > 0 ? taken.edge.max_iterations : null;
+        if (limit == null) {
+          // The validator refuses a back edge without a positive bound (E_LIMIT_UNBOUNDED),
+          // so `run` never sees one; refuse rather than invent a bound.
+          const err = structuredError({ code: 'E_LIMIT_UNBOUNDED', severity: 'block', locatable: false, path: `flows/${flowRecord}#${loopId}`, ids: [taken.edge.from, taken.edge.to], fix: { action: 'raise-limit-or-fix-loop', loop_id: loopId, max_iterations: null } });
+          writeWarnIfHalf(writer, runDir, id, stage);
+          writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'failed', code: err.code, loopId, from: taken.edge.from, to: taken.edge.to, iterations: used, fix: err.fix } });
+          writer.sync();
+          writeManifest(runDir, { runId: id, flowPath, flowRecord, blocks, status: 'failed', runStartedAt: runStart.ts, drift: driftAccepted });
+          return { exitCode: 1, runId: id, error: err };
+        }
+        if (used + 1 > limit) {
+          // The bound is spent: no goto, no stage.start/stage.end of a further
+          // turn (314920dc / ab343c38). `on_exhausted` turns it into an ok end
+          // with one info log; without it the run ends failed, rc=1.
+          if (taken.edge.on_exhausted) {
+            writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'log', payload: { severity: 'info', kind: 'loop-exhausted', loopId, iterations: used, onExhausted: String(taken.edge.on_exhausted) } });
+            break;
+          }
+          const err = structuredError({
+            code: 'E_LIMIT_UNBOUNDED',
+            severity: 'block',
+            locatable: false,
+            path: `flows/${flowRecord}#${loopId}`,
+            ids: [taken.edge.from, taken.edge.to],
+            fix: { action: 'raise-limit-or-fix-loop', loop_id: loopId, max_iterations: limit },
+          });
+          writeWarnIfHalf(writer, runDir, id, stage);
+          writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: judgeRunEndFailed(err, used) });
+          writer.sync();
+          writeManifest(runDir, { runId: id, flowPath, flowRecord, blocks, status: 'failed', runStartedAt: runStart.ts, drift: driftAccepted });
+          return { exitCode: 1, runId: id, error: err };
+        }
+        const gotoNo = used + 1;
+        gotoCount.set(loopId, gotoNo);
+        const checkResultId = checkResultIdOf(res.submit);
+        const edgePayload = { from: taken.edge.from, to: taken.edge.to, on: taken.edge.on ?? null, ...(Number.isInteger(taken.edge.max_iterations) ? { max_iterations: taken.edge.max_iterations } : {}), ...(taken.edge.on_exhausted ? { on_exhausted: taken.edge.on_exhausted } : {}), ...(taken.edge.id ? { id: taken.edge.id } : {}) };
+        writer.append({
+          run_id: id,
+          stage,
+          iteration,
+          actor: { kind: 'orchestrator', name: 'forge' },
+          type: 'flow.goto',
+          payload: { from: taken.edge.from, to: taken.edge.to, iteration: gotoNo, loopId, edge: edgePayload, ...(checkResultId ? { checkResultId } : {}) },
+        });
+        pending = taken.edge;
+        cursor = taken.edge.to;
+        continue;
+      }
+      // A plain edge: a failed stage that has somewhere to go keeps its
+      // `failed` stage.end as recorded and the walk continues.
+      pending = taken.edge;
+      cursor = taken.edge.to;
     }
     writeWarnIfHalf(writer, runDir, id, null);
     writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'ok' } });
@@ -299,6 +356,140 @@ export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, all
     }
     lock.release();
   }
+}
+
+// The walk over a flow's edges (#流水线:#10). `doc` is the parsed flow; a flow
+// given as a bare stage list (the old form) has no edges and is a chain.
+// Back edges come from the validator's own rule (`backEdgesOfScc`, 第 13 条),
+// so a goto is written exactly on the loops the validator let through, one
+// counter per `loopId` (第 15 条).
+export function buildGraph(doc, stages) {
+  const nodes = Array.isArray(doc?.nodes) && doc.nodes.length ? doc.nodes.map((n) => n.id) : stages;
+  const rawEdges = Array.isArray(doc?.edges) ? doc.edges.filter((e) => e && nodes.includes(e.from) && nodes.includes(e.to)) : [];
+  const edges = rawEdges.map((e, index) => ({ index, from: e.from, to: e.to, raw: e }));
+  const back = new Set();
+  for (const scc of stronglyConnectedIds(nodes, edges)) {
+    const members = new Set(scc);
+    const selfLoop = edges.some((e) => e.from === e.to && members.has(e.from));
+    if (scc.length < 2 && !selfLoop) continue;
+    const loopEdges = edges.filter((e) => members.has(e.from) && members.has(e.to));
+    const { back: found } = backEdgesOfScc(scc, loopEdges);
+    for (const b of found) back.add(b.raw);
+  }
+  const out = new Map(nodes.map((id) => [id, []]));
+  for (const e of rawEdges) {
+    if (back.has(e)) e.__back = true; // a local mark on this parsed doc, never written out
+    out.get(e.from).push(e);
+  }
+  // The flow's own entry when it has one; otherwise the first node in file order
+  // that nothing points at (the old chain form has no `entry`).
+  const entry = typeof doc?.entry === 'string' && out.has(doc.entry) ? doc.entry : nodes.find((id) => !rawEdges.some((e) => e.to === id)) ?? nodes[0];
+  // The two counters live in `runLinear`, one per run (4196b43d): a goto's
+  // number and a stage's entry number are different facts and never derive
+  // from each other.
+  return { nodes, out, entry, back, linear: rawEdges.length === 0 };
+}
+
+// Edge choice: a plain edge (no `on`) carries a stage that finished ok; an
+// `on` edge carries the submit statuses it names. Among equals the file order
+// wins, so the same flow always takes the same path.
+function edgeMatches(e, status, submitStatus) {
+  if (!e.on || typeof e.on !== 'object') return status === 'ok';
+  if (e.on.status === 'pass') return status === 'ok' && submitStatus === 'ok';
+  if (e.on.status === 'fail') return status === 'failed' && submitStatus === 'failed';
+  if (e.on.status === 'error') return status === 'failed' && submitStatus !== 'failed';
+  return false;
+}
+
+export function pickEdge(out, status, submitStatus) {
+  const matches = out.filter((e) => edgeMatches(e, status, submitStatus));
+  const conditional = matches.find((e) => e.on && typeof e.on === 'object');
+  const edge = conditional ?? matches[0];
+  return edge ? { edge, raw: edge, backEdge: edge.__back === true } : null;
+}
+
+// `run.end` is the one place a run ends, failed or not (69c94449). A plain
+// stage failure keeps the shape it had before; an exhausted loop carries the
+// loop's fields so the failure points at the counter that ran out. `iterations`
+// is the number of gotos actually written (== max when the bound is spent),
+// never `max` read back from the fix block (see `judgeSubmit` below).
+export function judgeRunEndFailed(error, used) {
+  if (error?.code === 'E_LIMIT_UNBOUNDED') {
+    return { status: 'failed', code: error.code, loopId: error.fix.loop_id, from: error.ids[0], to: error.ids[1], iterations: used, fix: error.fix };
+  }
+  return { status: 'failed' };
+}
+
+// The stage's Submit, judged once: which `status` the stage.end records and
+// which structured error goes with it (the order is the one `0957374` had).
+function judgeSubmit({ res, checksWritten, id, stage, flowRecord }) {
+  const ev = res.submit?.evidence;
+  // A stage that reports `failed`/`blocked` is a failed stage for the walk
+  // (stage.end.status and the `on: status=fail` edge both read this), as in
+  // `0957374`: only an ok submit with a broken chain changes its status later.
+  // A real runtime's classified error (E_RUNTIME_*, E_SCHEMA_INVALID from its
+  // Submit check) is recorded as-is instead of being re-wrapped.
+  if (res.submitError) return { status: 'failed', error: res.submitError };
+  if (!res.illegalEvent && (!Array.isArray(ev) || ev.length === 0)) {
+    return {
+      status: 'failed',
+      error: structuredError({
+        code: 'E_MISSING_EVIDENCE',
+        severity: 'block',
+        locatable: false,
+        path: `runs/${id}/events.jsonl#${stage}.submit.evidence`,
+        ids: [`stage:${stage}`],
+        fix: { action: 'attach evidence entries: {check, cmd, exit}' },
+      }),
+    };
+  }
+  if (res.illegalEvent) {
+    return {
+      status: 'failed',
+      error: structuredError({
+        code: 'E_ILLEGAL_STAGE_WRITE',
+        severity: 'block',
+        locatable: false,
+        path: `flows/${flowRecord}#${stage}`,
+        ids: [`stage:${stage}`],
+        fix: { action: 'events must be written through the orchestrator, not by the runner' },
+      }),
+    };
+  }
+  if (checksWritten) {
+    // Judgment wall: the checker file is read-only to the runner (A4.4).
+    return {
+      status: 'failed',
+      error: structuredError({
+        code: 'E_PERMISSION_GAP',
+        severity: 'block',
+        locatable: false,
+        path: `runs/${id}/checks.lock`,
+        ids: [`stage:${stage}`],
+        fix: { tool: 'write_checks', requiredBy: 'runner', agentSpec: null, suggestMayNot: 'may_not 冲突' },
+      }),
+    };
+  }
+  if (res.submit.status !== 'ok') {
+    return {
+      status: 'failed',
+      error: structuredError({
+        code: 'E_STAGE_FAILED',
+        severity: 'block',
+        locatable: false,
+        path: `runs/${id}/events.jsonl#${stage}`,
+        ids: [`stage:${stage}`],
+        fix: { action: 'retry-stage', hint: res.submit.next_hint ?? null },
+      }),
+    };
+  }
+  return { status: 'ok', error: null };
+}
+
+function checkResultIdOf(submit) {
+  if (!submit || typeof submit !== 'object') return null;
+  const body = { status: submit.status, summary: submit.summary ?? null, evidence: submit.evidence ?? [] };
+  return sha256Hex(canonicalJson(body)).slice(0, 32);
 }
 
 const DEFAULT_RUNTIME_TIMEOUT_S = 120;
@@ -409,6 +600,19 @@ function checkRuntimeSubmit(submit, stage) {
     if (RUNTIME_EVIDENCE_URL.test(e.cmd) || RUNTIME_EVIDENCE_URL.test(e.check)) return bad({ action: 'evidence must name a command or a file path, not a URL', field: `evidence[${i}].cmd` }, `submit.evidence[${i}]`);
   }
   return null;
+}
+
+// The nearest directory that has `blocks/`, starting at the flow's directory
+// and falling back to the run's root — the same rule the CLI's `validate`
+// uses to decide which block files a flow is judged against.
+function findProjectDir(start, fallback) {
+  let dir = path.resolve(start);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, 'blocks'))) return dir;
+    const up = path.dirname(dir);
+    if (up === dir) return path.resolve(fallback);
+    dir = up;
+  }
 }
 
 function loadFlow(flowPath) {

@@ -2,12 +2,14 @@
 # Deploy-side smoke (员工三号 550472e4 口径): after deploy, run the fake-runner sample flow once,
 # then assert the new run shows up in /snapshot. Requires the deployed workspace to include flows/ + fixtures.
 set -euo pipefail
-ROOT="${FORGE_ROOT:-/srv/agentforge}/current"
+# `current` is a symlink: resolve it, or `cd` keeps the symlinked PWD and the
+# `--flow` relative path is judged against the real directory (#流水线:#10 入口一致性).
+ROOT="$(readlink -f "${FORGE_ROOT:-/srv/agentforge}/current")"
 PORT="${FORGE_PORT:-8787}"
 BASE="http://127.0.0.1:$PORT"
 before="$(curl -fsS "$BASE/snapshot" | python3 -c 'import sys,json;print(sorted(r["run_id"] for r in json.load(sys.stdin)["runs"]))')" 
 # 写 run 必须钉在部署根（FORGE_ROOT），否则 FORGE_ROOT 指父目录时会写到 <FORGE_ROOT>/.forge 而不是 <ROOT>/.forge
-(cd "$ROOT" && FORGE_ROOT="$ROOT" FORGE_FAKE="${FORGE_FAKE:-ok}" node bin/forge.js run flows/main.yaml) >/dev/null
+(cd "$ROOT" && FORGE_ROOT="$ROOT" FORGE_FAKE="${FORGE_FAKE:-ok}" node bin/forge.js run --flow flows/main.yaml) >/dev/null
 after="$before"
 # /snapshot 是下一次请求才重算的：给最多 5 秒、每 0.5 秒重读一次，而不是立刻读一次就判失败
 for _ in $(seq 1 10); do

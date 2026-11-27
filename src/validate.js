@@ -103,15 +103,13 @@ function stronglyConnected(ids, edges) {
   return out;
 }
 
-// Back edges, 员工一号 第 13 条 (aadab14f) + 第 14 条 (845e5c84): per SCC, in
+// Back edges, 员工一号 第 13 条 (aadab14f) + 第 15 条 (a9da62b8): per SCC, in
 // file order. Repeatedly take the first remaining edge carrying a positive
 // integer max_iterations; if there is none, take the first edge whose removal
-// leaves its *target* able to reach its *source* AND leaves no closed cycle
-// among the remaining edges (one back edge per loop: two loops sharing one
-// back edge cannot be bounded by its single max_iterations). The taken edge is
-// a back edge and leaves the list. A self-loop is always a back edge. Loops
-// that share a back edge are the runtime counter's business (第 15 条).
-// `closedCyclesOf` stays for the tests that assert the shape of a loop.
+// leaves its target able to reach its source. The taken edge is a back edge and
+// leaves the list; a self-loop is always a back edge. Two loops that share one
+// back edge are not judged here: one max_iterations cannot bound two loops, and
+// the runtime's per-loopId counter stops them (第 15 条).
 export function backEdgesOfScc(scc, loopEdges) {
   const list = [...loopEdges].sort((a, b) => a.index - b.index);
   const back = [];
@@ -136,11 +134,9 @@ export function backEdgesOfScc(scc, loopEdges) {
     let picked = bounded ?? null;
     if (!picked) {
       for (const e of list) {
-        const live = list.filter((x) => x !== e);
         if (e.from === e.to) { picked = e; break; }
-        if (!reachesOver(e.to, e.from, live)) continue;
-        picked = e;
-        break;
+        const live = list.filter((x) => x !== e);
+        if (reachesOver(e.to, e.from, live)) { picked = e; break; }
       }
     }
     if (!picked) break;
@@ -148,32 +144,6 @@ export function backEdgesOfScc(scc, loopEdges) {
     back.push({ ...picked, liveAfter: [...list], liveWith: [...list, picked] });
   }
   return { back };
-}
-
-// Closed loops among `edges`: a strongly connected component of >= 2 nodes, or
-// a self-loop. Each loop comes back as a closed node list over real edges.
-function closedCyclesOf(edges) {
-  const nodes = [...new Set(edges.flatMap((e) => [e.from, e.to]))];
-  const loops = [];
-  for (const scc of stronglyConnected(nodes, edges)) {
-    const members = new Set(scc);
-    const loopEdges = edges.filter((e) => members.has(e.from) && members.has(e.to)).sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-    const self = loopEdges.find((e) => e.from === e.to);
-    if (scc.length < 2 && !self) continue;
-    if (scc.length < 2) { loops.push([self.from, self.from]); continue; }
-    const start = scc.filter((id) => loopEdges.some((e) => e.from === id)).sort()[0] ?? scc[0];
-    const path = [start];
-    let cur = start;
-    for (let guard = 0; guard < loopEdges.length + 2; guard++) {
-      const next = loopEdges.find((x) => x.from === cur && !path.slice(0, -1).some((p, i) => p === cur && path[i + 1] === x.to));
-      if (!next) break;
-      path.push(next.to);
-      cur = next.to;
-      if (cur === start) break;
-    }
-    loops.push(path[path.length - 1] === start ? path : [...path, start]);
-  }
-  return loops;
 }
 
 // `on` itself: `from` is a value source, `status` a state, an optional `check`

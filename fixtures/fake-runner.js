@@ -7,6 +7,9 @@
 //   crash            exits 2 with one stderr line (no error event may be written)
 //   crash-midwrite   leaves a half line in events.jsonl, then exits 2
 //   fail-<stage>     that stage submits `failed`, all others succeed
+//   retry-<stage>:<n>  that stage fails while FORGE_ITERATION <= n, then succeeds
+//                    (drives the bounded loop in fixtures/loop-bounded.yaml; no
+//                    state file, so successive runs do not bleed into each other)
 //   multi-output     two artifacts (subflow case, P0.5)
 import { appendFileSync, writeFileSync } from 'node:fs';
 
@@ -17,6 +20,15 @@ const base = { v: 1, artifacts: [{ path: `out/${stage}`, kind: 'tree' }], summar
 if (mode && mode.startsWith('fail-')) {
   // Stage-scoped failure: `fail-<stage>` makes only that stage submit `failed`.
   if (stage === mode.slice(5)) out({ ...base, status: 'failed', evidence: [{ check: 'stub', cmd: 'noop', exit: 1 }], next_hint: `${stage} failed` });
+  else out({ ...base, status: 'ok' });
+  process.exit(0);
+}
+const retry = /^retry-([a-z0-9-]+):([0-9]+)$/.exec(mode);
+if (retry) {
+  // Stateless: the orchestrator passes FORGE_ITERATION (run.js:467), so nothing
+  // is left on disk and a second run starts again at iteration 1.
+  const it = Number(process.env.FORGE_ITERATION || 1);
+  if (retry[1] === stage && it <= Number(retry[2])) out({ ...base, status: 'failed', evidence: [{ check: 'stub', cmd: 'noop', exit: 1 }], next_hint: `${stage} failed` });
   else out({ ...base, status: 'ok' });
   process.exit(0);
 }
