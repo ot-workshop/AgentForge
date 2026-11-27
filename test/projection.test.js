@@ -34,7 +34,8 @@ test('A1.2 incremental returns only seq > since, in order', () => {
 test('A1.3 only one projection implementation', () => {
   const src = fs.readFileSync(new URL('../src/project.js', import.meta.url), 'utf8');
   assert.equal((src.match(/ev\.seq > since/g) || []).length, 1);
-  const others = fs.readdirSync(new URL('../src/', import.meta.url)).filter((f) => f !== 'project.js');
+  // `withFileTypes`: a sub-directory (e.g. src/runtime/) is not a source file.
+  const others = fs.readdirSync(new URL('../src/', import.meta.url), { withFileTypes: true }).filter((f) => f.name !== 'project.js' && f.isFile()).map((f) => f.name);
   for (const f of others) {
     const text = fs
       .readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
