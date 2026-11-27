@@ -9,6 +9,7 @@
 // under test is never written to.
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { node, run as runCmd, rawLine, tempDir, copyDir, removeDir } from './exec.js';
 
 const V = 'V1'; // standard id prefix: V1..V5 follow 员工一号 b03da5fa numbering
@@ -290,41 +291,168 @@ export function gate_freezeAllowed(repo) {
 }
 
 // ---------------------------------------------------------------- 部署段（复用员工四号脚本）
-export function d1_deployScriptsSmoke(repo) {
-  const id = 'D1 deploy-scripts-present';
-  const scripts = ['deploy/deploy.sh', 'deploy/ci/acceptance.sh', 'deploy/smoke.sh', 'deploy/start.sh'];
-  const missing = scripts.filter((s) => !fs.existsSync(path.join(repo, s)));
-  const syntax = scripts.map((s) => ({ s, r: runCmd('bash', ['-n', path.join(repo, s)]) }));
+// 员工四号 bd7215f3：D1 不能只看「文件在 + bash -n」，否则 deploy.sh 被清空也是绿的；
+// D2 必须真的起一次服务并访问三条接口，名字与做法一致。
+const DEPLOY_MARKERS = [
+  { file: 'deploy/deploy.sh', needles: ['deploy-report-', 'merge-base --is-ancestor'] },
+  { file: 'deploy/smoke.sh', needles: ['/healthz', '/snapshot', '/events'] },
+];
 
-  const bad = syntax.filter((x) => x.r.code !== 0);
-  return row(
-    id,
-    '部署段复用仓库 deploy.sh + acceptance.sh（不另写起服务逻辑）',
-    missing.length === 0 && bad.length === 0 ? 'pass' : 'fail',
-    scripts.map((s) => `bash -n ${s}`),
-    missing.length ? `missing: ${missing.join(',')}` : `bash -n ok: ${scripts.length}/${scripts.length}`,
-    {
-      notes: '真正的「按 sha 部署 → 冒烟 → 出报告」由 deploy.sh 执行（先停已部署实例再换端口，需另定）；套件只判脚本在位且语法正确',
-    },
-  );
+function markersPresent(repo, overrides = {}) {
+  const missing = [];
+  for (const { file, needles } of DEPLOY_MARKERS) {
+    const p = path.join(repo, file);
+    const text = overrides[file] ?? (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '');
+    for (const n of needles) if (!text.includes(n)) missing.push(`${file}:${n}`);
+  }
+  return missing;
 }
 
-export function d2_servedRunTraceable(repo) {
-  const id = 'D2 served-run-traceable';
-  const standard = '/snapshot 能看到刚跑完的 run，且它的阶段进度与事件链一致';
-  const scratch = tempDir('af-d2-');
-  try {
-    copyDir(repo, scratch);
-    fs.rmSync(path.join(scratch, '.forge'), { recursive: true, force: true });
-    const run = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'served-1', '--flow', path.join(scratch, 'flows', 'main.yaml')], {
-      env: { FORGE_ROOT: scratch, FORGE_FAKE: '1' },
+export function d1_deployScriptsSubstantive(repo) {
+  const id = 'D1 deploy-scripts-substantive';
+  const scripts = ['deploy/deploy.sh', 'deploy/ci/acceptance.sh', 'deploy/smoke.sh', 'deploy/start.sh'];
+  const missingFiles = scripts.filter((s) => !fs.existsSync(path.join(repo, s)));
+  const syntax = scripts.map((s) => ({ s, r: runCmd('bash', ['-n', path.join(repo, s)]) }));
+  const badSyntax = syntax.filter((x) => x.r.code !== 0);
+  const missing = markersPresent(repo);
+  // 反例 1：把 smoke.sh 的 /events 删掉（模拟有人精简脚本）→ 必须被判红。
+  const smoke = fs.existsSync(path.join(repo, 'deploy/smoke.sh')) ? fs.readFileSync(path.join(repo, 'deploy', 'smoke.sh'), 'utf8') : '';
+  const red1 = markersPresent(repo, { 'deploy/smoke.sh': smoke.replaceAll('/events', '') }).length > 0;
+  // 反例 2：deploy.sh 只剩 exit 0（「永远绿」正是这一条要挡的）。
+  const red2 = markersPresent(repo, { 'deploy/deploy.sh': '#!/usr/bin/env bash\nexit 0\n' }).length > 0;
+  const reds = [
+    row(`${id}.red`, '反例：smoke.sh 少了 /events 必须红', red1 ? 'pass' : 'fail', ['markers(smoke.sh without /events)'], ''),
+    row(`${id}.red2`, '反例：deploy.sh 被清空成 exit 0 必须红', red2 ? 'pass' : 'fail', ['markers(deploy.sh = exit 0)'], ''),
+  ];
+  const ok = missingFiles.length === 0 && badSyntax.length === 0 && missing.length === 0;
+  return row(id, '部署段复用 deploy.sh + acceptance.sh，且脚本内容具备它声称的行为', ok ? 'pass' : 'fail', [
+    ...scripts.map((s) => `bash -n ${s}`),
+    ...DEPLOY_MARKERS.map((m) => `${m.file} contains ${m.needles.join(' / ')}`),
+  ], ok ? `bash -n ${scripts.length}/${scripts.length}; markers present` : `missing=${[...missingFiles, ...badSyntax.map((x) => x.s)].join(',') || 'none'} markers=${missing.join(',') || 'none'}`, {
+    reds,
+    notes: 'D1/D2 之外的真部署由 deploy/deploy.sh 执行（输入必须是 origin/main 祖先 sha，按 sha 落 <root>/<sha>/，自动写 deploy-report-<short>.md，先停旧实例再起）；这一步需要独占端口，属人执行，不放在套件里自动跑',
+  });
+}
+
+// Pick a free port by asking the kernel (bind :0, read it, close). `forge serve
+// --port 0` cannot be used: it logs the requested port (0), and Node then picks
+// its own. 8787 / 18982 belong to other people, so never those by default.
+async function freePort() {
+  const net = await import('node:net');
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
     });
-    const snap = forgeJson(scratch, ['snapshot', '--run', 'served-1']);
-    const r = snap.json?.runs?.find((x) => x.run_id === 'served-1');
-    const stages = r?.stages?.map((s) => `${s.stage}@${s.iteration}:${s.status}`) ?? [];
-    const complete = stages.length === 3 && stages.every((s) => s.endsWith(':ok'));
-    return row(id, standard, run.code === 0 && complete ? 'pass' : 'fail', [`run --run served-1 → ${run.code}`, 'snapshot --run served-1'], stages.join(',') || rawLine(snap.stdout || snap.stderr));
+  });
+}
+
+async function serveProbe(repo, { runId }) {
+  const { spawn } = await import('node:child_process');
+  const scratch = tempDir('af-d2s-');
+  // A checkout copy keeps `.forge/` out of the repo under test.
+  for (const d of ['bin', 'src', 'flows', 'blocks', 'fixtures', 'agents', 'checks', 'package.json']) {
+    fs.cpSync(path.join(repo, d), path.join(scratch, d), { recursive: true });
+  }
+  const wantPort = await freePort();
+  const child = spawn(process.execPath, [path.join(scratch, 'bin', 'forge.js'), 'serve', '--port', String(wantPort)], {
+    cwd: scratch,
+    env: { ...process.env, FORGE_ROOT: scratch },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const stop = () => {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      /* already gone */
+    }
+  };
+  try {
+    const port = await new Promise((resolve, reject) => {
+      let buf = '';
+      const to = setTimeout(() => reject(new Error('serve printed no port within 10s')), 10_000);
+      child.stdout.on('data', (c) => {
+        buf += c.toString();
+        const m = /listen(?:ing)?[^\d]*(\d{2,5})|:(\d{2,5})/.exec(buf);
+        if (m) {
+          clearTimeout(to);
+          resolve(Number(m[1] ?? m[2]));
+        }
+      });
+      child.stderr.on('data', (c) => {
+        buf += c.toString();
+        const m = /127\.0\.0\.1:(\d{2,5})/.exec(buf);
+        if (m) {
+          clearTimeout(to);
+          resolve(Number(m[1]));
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(to);
+        reject(new Error(`serve exited early rc=${code}: ${buf.slice(0, 200)}`));
+      });
+    });
+    const runRank = spawnSync(process.execPath, [path.join(scratch, 'bin', 'forge.js'), 'run', '--run', runId, '--flow', 'flows/main.yaml'], { cwd: scratch, env: { ...process.env, FORGE_ROOT: scratch }, encoding: 'utf8' });
+    const get = async (p) => {
+      const res = await fetch(`http://127.0.0.1:${port}${p}`, { signal: AbortSignal.timeout(5000) });
+      return { status: res.status, text: await res.text(), type: res.headers.get('content-type') };
+    };
+    const health = await get('/healthz');
+    const snap = await get('/snapshot');
+    // First SSE frame, or a prompt close for an empty set (A2.4): read a little, then drop.
+    const ev = await (async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/events?since=0`, { signal: AbortSignal.timeout(5000) });
+      const reader = res.body?.getReader();
+      let text = '';
+      if (reader) {
+        const { value } = await reader.read();
+        text = value ? new TextDecoder().decode(value) : '';
+        await reader.cancel().catch(() => {});
+      }
+      return { status: res.status, text, type: res.headers.get('content-type') };
+    })();
+    let healthOk = false;
+    let snapIds = [];
+    try {
+      healthOk = health.status === 200 && JSON.parse(health.text).ok === true;
+      snapIds = JSON.parse(snap.text).runs.map((r) => r.run_id);
+    } catch {
+      healthOk = false;
+    }
+    const firstFrame = /^data: .*"type":"run\.start"/m.test(ev.text);
+    return { port, runRank: runRank.status, healthOk, snapIds, firstFrame, evStatus: ev.status, raw: `port=${port} run rc=${runRank.status} healthz=${health.status} snapshot.runs=[${snapIds.join(',')}] events=${ev.status} firstFrame=${firstFrame ? 'run.start' : 'none'}` };
+  } finally {
+    stop();
+    removeDir(scratch);
+  }
+}
+
+export async function d2_servedRunTraceable(repo) {
+  const id = 'D2 serves-healthz-snapshot-events';
+  const standard = '起一次真服务：/healthz、/snapshot 能看到刚跑完的 run、/events 首帧是 run.start';
+  const runId = `acc-${Date.now().toString(36)}`;
+  const r = await serveProbe(repo, { runId });
+  const ok = r.runRank === 0 && r.healthOk && r.snapIds.includes(runId) && r.firstFrame;
+  // 反例：请求一个不存在的 run，/snapshot 不得把它报出来（防止「任何 id 都算在」）。
+  const scratch = tempDir('af-d2red-');
+  let redOk = false;
+  try {
+    for (const d of ['bin', 'src', 'flows', 'blocks', 'fixtures', 'agents', 'checks', 'package.json']) {
+      fs.cpSync(path.join(repo, d), path.join(scratch, d), { recursive: true });
+    }
+    const snap = forgeJson(scratch, ['snapshot', '--run', 'no-such-run']);
+    redOk = !JSON.stringify(snap.json ?? {}).includes('no-such-run');
   } finally {
     removeDir(scratch);
   }
+  const reds = [row(`${id}.red`, '反例：不存在的 run 不得出现在快照里', redOk ? 'pass' : 'fail', ['snapshot --run no-such-run'], '')];
+  return row(id, standard, ok ? 'pass' : 'fail', [
+    'forge serve --port <内核探测的空闲端口>',
+    'GET /healthz',
+    'GET /snapshot',
+    'GET /events?since=0（首帧）',
+    `forge run --run ${runId} --flow flows/main.yaml`,
+  ], r.raw, { reds, notes: '在临时副本里起服务，端口先向内核探测空闲；不碰 8787 / 18982' });
 }

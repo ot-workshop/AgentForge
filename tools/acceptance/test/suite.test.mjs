@@ -122,4 +122,38 @@ test('G0 stays red while H2 is red', () => {
   const g0 = json.rows.find((r) => r.id.startsWith('G0'));
   if (h2.status !== 'pass') assert.equal(g0.status, 'fail');
 });
+test('D1 goes red when smoke.sh loses /events or deploy.sh is emptied', () => {
+  const dir = scratchCopy();
+  try {
+    const smoke = path.join(dir, 'deploy', 'smoke.sh');
+    fs.writeFileSync(smoke, fs.readFileSync(smoke, 'utf8').replaceAll('/events', ''));
+    let { json } = pickOne(dir);
+    assert.equal(json.rows.find((r) => r.id.startsWith('D1')).status, 'fail');
+    fs.writeFileSync(path.join(dir, 'deploy', 'deploy.sh'), '#!/usr/bin/env bash\nexit 0\n');
+    ({ json } = pickOne(dir));
+    const d1 = json.rows.find((r) => r.id.startsWith('D1'));
+    assert.equal(d1.status, 'fail', JSON.stringify(d1.raw));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('D2 goes red when /events stops streaming run.start', () => {
+  const dir = scratchCopy();
+  try {
+    const f = path.join(dir, 'src', 'serve.js');
+    const s = fs.readFileSync(f, 'utf8');
+    // Serve an empty SSE stream: /healthz and /snapshot stay fine, only the
+    // event tail breaks, so a green D2 would be a judge that does not look.
+    const i = s.indexOf("url.pathname === '/events'");
+    assert.ok(i > 0, 'events route not found');
+    const patched = s.slice(0, i) + "url.pathname === '/events-broken'" + s.slice(i + "url.pathname === '/events'".length);
+    fs.writeFileSync(f, patched);
+    const { json } = pickOne(dir);
+    const d2 = json.rows.find((r) => r.id.startsWith('D2'));
+    assert.equal(d2.status, 'fail', JSON.stringify(d2.raw));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 });

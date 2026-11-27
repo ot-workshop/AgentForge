@@ -18,7 +18,7 @@ import {
   v3_permissionEnforced,
   v4_loops,
   v5_humanEnds,
-  d1_deployScriptsSmoke,
+  d1_deployScriptsSubstantive,
   d2_servedRunTraceable,
 } from './lib/criteria.js';
 
@@ -55,26 +55,26 @@ if (!fs.existsSync(path.join(repo, 'bin', 'forge.js'))) {
 
 // A probe that throws is a FAIL row with the exception's line, never a crash:
 // an acceptance suite that cannot report is worse than one that reports red.
-function guarded(id, fn) {
+async function guarded(id, fn) {
   try {
-    return fn();
+    return await fn();
   } catch (e) {
     return { id, standard: '(probe threw)', status: 'fail', commands: [], raw: String(e?.message ?? e).split('\n')[0] };
   }
 }
 
 const rows = [
-  guarded('G0 freeze-allowed', () => gate_freezeAllowed(repo)),
-  guarded('H1 run-positional-arg', () => h1_positionalRefused(repo)),
-  guarded('H2 flow-path-relative', () => h2_flowPathRelative(repo)),
-  guarded('V1.1 人机同门', () => v1_sameValidator(repo)),
-  guarded('V1.2a replay==incremental==从头', () => v2_replayEquivalence(repo)),
-  guarded('V1.2b 失败定位到阶段', () => v2_failureLocated(repo)),
-  guarded('V1.3 越权被拦', () => v3_permissionEnforced(repo)),
-  guarded('V1.4 分支与有限循环', () => v4_loops()),
-  guarded('V1.5 人只在两端', () => v5_humanEnds(repo)),
-  guarded('D1 deploy-scripts-present', () => d1_deployScriptsSmoke(repo)),
-  guarded('D2 served-run-traceable', () => d2_servedRunTraceable(repo)),
+  await guarded('G0 freeze-allowed', () => gate_freezeAllowed(repo)),
+  await guarded('H1 run-positional-arg', () => h1_positionalRefused(repo)),
+  await guarded('H2 flow-path-relative', () => h2_flowPathRelative(repo)),
+  await guarded('V1.1 人机同门', () => v1_sameValidator(repo)),
+  await guarded('V1.2a replay==incremental==从头', () => v2_replayEquivalence(repo)),
+  await guarded('V1.2b 失败定位到阶段', () => v2_failureLocated(repo)),
+  await guarded('V1.3 越权被拦', () => v3_permissionEnforced(repo)),
+  await guarded('V1.4 分支与有限循环', () => v4_loops()),
+  await guarded('V1.5 人只在两端', () => v5_humanEnds(repo)),
+  await guarded('D1 deploy-scripts-substantive', () => d1_deployScriptsSubstantive(repo)),
+  await guarded('D2 serves-healthz-snapshot-events', () => d2_servedRunTraceable(repo)),
 ];
 
 const count = (st) => rows.filter((r) => r.status === st).length;

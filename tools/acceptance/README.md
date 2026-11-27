@@ -27,13 +27,14 @@ fails, `2` usage error. It never writes into `<checkout>`: every probe that need
 | `V1.3 越权被拦` | 权限边界由编排器强制 | a runner that rewrites the checker is refused (`E_PERMISSION_GAP`) |
 | `V1.4 分支与有限循环` | 循环/分支，上限是硬限制 | 未验 until #10 lands |
 | `V1.5 人只在两端` | agent 不能自己宣布通过 | 未验: no machine-checkable carrier in the repo yet |
-| `D1 deploy-scripts-present` | 部署段复用 `deploy.sh` + `acceptance.sh` | scripts present and `bash -n` clean |
-| `D2 served-run-traceable` | `/snapshot` 看得到刚跑完的 run | three stages `ok` in the projection |
+| `D1 deploy-scripts-substantive` | 部署段复用 `deploy.sh` + `acceptance.sh` | `bash -n` clean **and** the scripts still contain what they claim (`deploy-report-`, `merge-base --is-ancestor`, `/healthz` `/snapshot` `/events`) |
+| `D2 serves-healthz-snapshot-events` | 起一次真服务 | free port from the kernel, `/healthz` ok, `/snapshot` lists the fresh run, `/events?since=0` first frame is `run.start`, then the process is stopped |
 
 Every row carries `reds`: probes that must be **red on a broken implementation**
 and green on a correct one. The suite's own tests mutate a scratch copy
 (`Validator drops E_CYCLE`, `failed stage recorded as ok`, `orchestrator ignores a
-rewritten checker`) and assert the matching row turns `fail`.
+rewritten checker`, `smoke.sh loses /events`, `deploy.sh emptied`, `serve stops
+streaming run.start`) and assert the matching row turns `fail`.
 
 ## In-repo vs standalone
 
@@ -41,3 +42,11 @@ Inside the AgentForge checkout this directory is `tools/acceptance/` and `--repo
 works directly. The suite imports nothing from `src/` except through the probe that
 deliberately calls the library validator, so it also runs from outside a checkout
 (`--repo /path/to/checkout`).
+
+## Deploy in one line
+
+`D1`/`D2` are the parts a machine can judge. The real deployment is still
+`deploy/deploy.sh <merge-sha>`: its input must be an ancestor of `origin/main`, it
+lands under `<root>/<sha>/`, writes `deploy-report-<short>.md`, and stops the old
+instance before starting the new one. That needs an exclusive port and is run by a
+person, never by this suite.
