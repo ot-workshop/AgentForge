@@ -134,15 +134,26 @@ test('runtime exit 401 is E_RUNTIME_AUTH, exit 429 is E_RUNTIME_QUOTA, other fai
   }
 });
 
-test('a hung runtime times out (E_RUNTIME_TIMEOUT) and its children are killed', async () => {
+const alive = (pid) => {
+  try { fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return true; } catch { return false; }
+};
+
+test('a hung runtime times out (E_RUNTIME_TIMEOUT) and, after the close window, the runtime and its tree are gone', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-hang-'));
-  const marker = path.join(dir, 'child-survived');
   const bin = path.join(dir, 'hang-runtime.cjs');
-  // The runtime starts a grandchild that would leave a marker after 3s, then hangs itself.
+  const report = path.join(dir, 'hung.json');
+  // The runtime starts a grandchild in the adapter's group (what opencode
+  // does), names both pids in `report`, then hangs; the grandchild never exits
+  // on its own, so "still there after the window" means the kill missed it.
   const lines = [
+    "const fs = require('fs');",
     "process.argv[2] === '--version' && (console.log('hang-runtime 1.0'), process.exit(0));",
+    `const report = ${JSON.stringify(report)};`,
+    "fs.writeFileSync(report, JSON.stringify({ runtime: process.pid, children: [] }));",
     "const { spawn } = require('child_process');",
-    "spawn(process.execPath, ['-e', 'setTimeout(()=>require(\"fs\").writeFileSync(' + JSON.stringify(' + JSON.stringify(marker) + ') + ', \"x\"), 3000)'], { detached: true, stdio: 'ignore' }).unref();",
+    "const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+    "c.unref();",
+    "fs.writeFileSync(report, JSON.stringify({ runtime: process.pid, children: [c.pid] }));",
     "setInterval(() => {}, 1000);",
   ].join(String.fromCharCode(10));
   fs.writeFileSync(bin, '#!/usr/bin/env node' + String.fromCharCode(10) + lines + String.fromCharCode(10), { mode: 0o755 });
@@ -152,8 +163,13 @@ test('a hung runtime times out (E_RUNTIME_TIMEOUT) and its children are killed',
     (e) => e.code === 'E_RUNTIME_TIMEOUT' && e.fix.timeout_s === 1 || (console.error('timeout err was', e && e.code, e && e.message), false),
   );
   assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0}ms`);
-  await new Promise((r) => setTimeout(r, 2600));
-  assert.equal(fs.existsSync(marker), false, 'grandchild must be gone after the timeout kill');
+  // Inside the close window the kernel may still be tearing the group down
+  // (员工一号 1f7d3641: Z/R right after the signal, ENOENT by 500ms): wait it
+  // out, then require both pids gone. Never assert at 0ms.
+  await new Promise((r) => setTimeout(r, 500));
+  const { runtime, children } = JSON.parse(fs.readFileSync(report, 'utf8'));
+  assert.equal(alive(runtime), false, `runtime ${runtime} must be gone after the timeout kill`);
+  for (const c of children) assert.equal(alive(c), false, `grandchild ${c} must be gone after the timeout kill`);
 });
 
 test('runtime call quota stops before a second call (E_RUNTIME_QUOTA)', () => {
