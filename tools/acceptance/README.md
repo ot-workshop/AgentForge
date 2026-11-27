@@ -28,7 +28,7 @@ fails, `2` usage error. It never writes into `<checkout>`: every probe that need
 | `V1.4 分支与有限循环` | 循环/分支，上限是硬限制 | 未验 until #10 lands |
 | `V1.5 人只在两端` | agent 不能自己宣布通过 | **负向判据**（员工一号 820539da）：一次正常 run 里没有 `actor.kind=human` / `type` 以 `accept` 结尾的事件，`manifest` 没有 accepted 字段，`src/` 没有写这类事件的代码路径。正向那一半（人工验收命令）等 #9 第 3 块落地再补 |
 | `D1 deploy-scripts-substantive` | 部署段复用 `deploy.sh` + `acceptance.sh` | `bash -n` clean **and** the scripts still contain what they claim (`deploy-report-`, `merge-base --is-ancestor`, `/healthz` `/snapshot` `/events`) |
-| `D2 serves-healthz-snapshot-events` | 起一次真服务 | free port from the kernel, `/healthz` ok, `/snapshot` lists the fresh run, `/events?since=0` first frame is `run.start`, then the process is stopped |
+| `D2 serves-healthz-snapshot-events` | 起一次真服务 | calls `deploy/ci/serve_probe.sh` (员工四号) on a scratch copy: free port, `/healthz`, `/snapshot`, `/events?run=…` first frame `run.start`, then it stops the server |
 
 Every row carries `reds`: probes that must be **red on a broken implementation**
 and green on a correct one. The suite's own tests mutate a scratch copy

@@ -9,7 +9,6 @@
 // under test is never written to.
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { node, run as runCmd, rawLine, tempDir, copyDir, removeDir } from './exec.js';
 
 const V = 'V1'; // standard id prefix: V1..V5 follow 员工一号 b03da5fa numbering
@@ -352,9 +351,11 @@ export function gate_freezeAllowed(repo) {
 // ---------------------------------------------------------------- 部署段（复用员工四号脚本）
 // 员工四号 bd7215f3：D1 不能只看「文件在 + bash -n」，否则 deploy.sh 被清空也是绿的；
 // D2 必须真的起一次服务并访问三条接口，名字与做法一致。
+// 员工一号 820539da：D2 直接调员工四号的 deploy/ci/serve_probe.sh，不另写起服务逻辑。
 const DEPLOY_MARKERS = [
   { file: 'deploy/deploy.sh', needles: ['deploy-report-', 'merge-base --is-ancestor'] },
   { file: 'deploy/smoke.sh', needles: ['/healthz', '/snapshot', '/events'] },
+  { file: 'deploy/ci/serve_probe.sh', needles: ['/healthz', '/snapshot', '/events?run=', 'PROBE OK'] },
 ];
 
 function markersPresent(repo, overrides = {}) {
@@ -393,125 +394,44 @@ export function d1_deployScriptsSubstantive(repo) {
   });
 }
 
-// Pick a free port by asking the kernel (bind :0, read it, close). `forge serve
-// --port 0` cannot be used: it logs the requested port (0), and Node then picks
-// its own. 8787 / 18982 belong to other people, so never those by default.
-async function freePort() {
-  const net = await import('node:net');
-  return new Promise((resolve, reject) => {
-    const s = net.createServer();
-    s.once('error', reject);
-    s.listen(0, '127.0.0.1', () => {
-      const { port } = s.address();
-      s.close(() => resolve(port));
-    });
-  });
-}
-
-async function serveProbe(repo, { runId }) {
-  const { spawn } = await import('node:child_process');
-  const scratch = tempDir('af-d2s-');
-  // A checkout copy keeps `.forge/` out of the repo under test.
-  for (const d of ['bin', 'src', 'flows', 'blocks', 'fixtures', 'agents', 'checks', 'package.json']) {
-    fs.cpSync(path.join(repo, d), path.join(scratch, d), { recursive: true });
-  }
-  const wantPort = await freePort();
-  const child = spawn(process.execPath, [path.join(scratch, 'bin', 'forge.js'), 'serve', '--port', String(wantPort)], {
-    cwd: scratch,
-    env: { ...process.env, FORGE_ROOT: scratch },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const stop = () => {
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      /* already gone */
-    }
-  };
-  try {
-    const port = await new Promise((resolve, reject) => {
-      let buf = '';
-      const to = setTimeout(() => reject(new Error('serve printed no port within 10s')), 10_000);
-      child.stdout.on('data', (c) => {
-        buf += c.toString();
-        const m = /listen(?:ing)?[^\d]*(\d{2,5})|:(\d{2,5})/.exec(buf);
-        if (m) {
-          clearTimeout(to);
-          resolve(Number(m[1] ?? m[2]));
-        }
-      });
-      child.stderr.on('data', (c) => {
-        buf += c.toString();
-        const m = /127\.0\.0\.1:(\d{2,5})/.exec(buf);
-        if (m) {
-          clearTimeout(to);
-          resolve(Number(m[1]));
-        }
-      });
-      child.on('exit', (code) => {
-        clearTimeout(to);
-        reject(new Error(`serve exited early rc=${code}: ${buf.slice(0, 200)}`));
-      });
-    });
-    const runRank = spawnSync(process.execPath, [path.join(scratch, 'bin', 'forge.js'), 'run', '--run', runId, '--flow', 'flows/main.yaml'], { cwd: scratch, env: { ...process.env, FORGE_ROOT: scratch }, encoding: 'utf8' });
-    const get = async (p) => {
-      const res = await fetch(`http://127.0.0.1:${port}${p}`, { signal: AbortSignal.timeout(5000) });
-      return { status: res.status, text: await res.text(), type: res.headers.get('content-type') };
-    };
-    const health = await get('/healthz');
-    const snap = await get('/snapshot');
-    // First SSE frame, or a prompt close for an empty set (A2.4): read a little, then drop.
-    const ev = await (async () => {
-      const res = await fetch(`http://127.0.0.1:${port}/events?since=0`, { signal: AbortSignal.timeout(5000) });
-      const reader = res.body?.getReader();
-      let text = '';
-      if (reader) {
-        const { value } = await reader.read();
-        text = value ? new TextDecoder().decode(value) : '';
-        await reader.cancel().catch(() => {});
-      }
-      return { status: res.status, text, type: res.headers.get('content-type') };
-    })();
-    let healthOk = false;
-    let snapIds = [];
-    try {
-      healthOk = health.status === 200 && JSON.parse(health.text).ok === true;
-      snapIds = JSON.parse(snap.text).runs.map((r) => r.run_id);
-    } catch {
-      healthOk = false;
-    }
-    const firstFrame = /^data: .*"type":"run\.start"/m.test(ev.text);
-    return { port, runRank: runRank.status, healthOk, snapIds, firstFrame, evStatus: ev.status, raw: `port=${port} run rc=${runRank.status} healthz=${health.status} snapshot.runs=[${snapIds.join(',')}] events=${ev.status} firstFrame=${firstFrame ? 'run.start' : 'none'}` };
-  } finally {
-    stop();
-    removeDir(scratch);
-  }
-}
-
 export async function d2_servedRunTraceable(repo) {
   const id = 'D2 serves-healthz-snapshot-events';
-  const standard = '起一次真服务：/healthz、/snapshot 能看到刚跑完的 run、/events 首帧是 run.start';
-  const runId = `acc-${Date.now().toString(36)}`;
-  const r = await serveProbe(repo, { runId });
-  const ok = r.runRank === 0 && r.healthOk && r.snapIds.includes(runId) && r.firstFrame;
-  // 反例：请求一个不存在的 run，/snapshot 不得把它报出来（防止「任何 id 都算在」）。
-  const scratch = tempDir('af-d2red-');
-  let redOk = false;
-  try {
-    for (const d of ['bin', 'src', 'flows', 'blocks', 'fixtures', 'agents', 'checks', 'package.json']) {
-      fs.cpSync(path.join(repo, d), path.join(scratch, d), { recursive: true });
+  const standard = '起一次真服务（复用 deploy/ci/serve_probe.sh）：/healthz、/snapshot 看得到 run、/events 首帧是 run.start';
+  const probe = path.join(repo, 'deploy', 'ci', 'serve_probe.sh');
+  if (!fs.existsSync(probe)) {
+    return row(id, standard, 'unverified', ['deploy/ci/serve_probe.sh 不在被测提交里'], '', { reds: [], notes: '依赖员工四号的 PR（feat/serve-probe）；合入后本条自动开判' });
+  }
+  const copyParts = (dst) => {
+    for (const d of ['bin', 'src', 'flows', 'blocks', 'fixtures', 'agents', 'checks', 'deploy', 'package.json']) {
+      fs.cpSync(path.join(repo, d), path.join(dst, d), { recursive: true });
     }
-    const snap = forgeJson(scratch, ['snapshot', '--run', 'no-such-run']);
-    redOk = !JSON.stringify(snap.json ?? {}).includes('no-such-run');
+  };
+  const scratch = tempDir('af-d2-');
+  let r;
+  try {
+    copyParts(scratch);
+    r = runCmd('bash', [path.join(scratch, 'deploy', 'ci', 'serve_probe.sh'), scratch], { timeoutMs: 120_000 });
   } finally {
     removeDir(scratch);
   }
-  const reds = [row(`${id}.red`, '反例：不存在的 run 不得出现在快照里', redOk ? 'pass' : 'fail', ['snapshot --run no-such-run'], '')];
-  return row(id, standard, ok ? 'pass' : 'fail', [
-    'forge serve --port <内核探测的空闲端口>',
-    'GET /healthz',
-    'GET /snapshot',
-    'GET /events?since=0（首帧）',
-    `forge run --run ${runId} --flow flows/main.yaml`,
-  ], r.raw, { reds, notes: '在临时副本里起服务，端口先向内核探测空闲；不碰 8787 / 18982' });
+  const line = r.stdout.trim().split('\n').filter(Boolean).pop() ?? '';
+  const ok = r.code === 0 && /^PROBE OK: .*run=/.test(line);
+  // 反例：serve.js 换成导出不了的空壳 -> 探针必须非 0（能判红）。
+  const bad = tempDir('af-d2red-');
+  let redOk = false;
+  let redLine = '';
+  try {
+    copyParts(bad);
+    fs.writeFileSync(path.join(bad, 'src', 'serve.js'), '// broken on purpose\nexport {}\n');
+    const rb = runCmd('bash', [path.join(bad, 'deploy', 'ci', 'serve_probe.sh'), bad], { timeoutMs: 120_000 });
+    redOk = rb.code !== 0;
+    redLine = rawLine(rb.stdout || rb.stderr);
+  } finally {
+    removeDir(bad);
+  }
+  const reds = [row(`${id}.red`, '反例：serve 导出不了时必须非 0', redOk ? 'pass' : 'fail', ['serve_probe.sh on a broken src/serve.js'], redLine)];
+  return row(id, standard, ok && redOk ? 'pass' : 'fail', ['bash deploy/ci/serve_probe.sh <scratch>（脚本自挑空闲端口，结束时杀 serve）'], line || rawLine(r.stdout || r.stderr), {
+    reds,
+    notes: '在临时副本里跑；不碰 8787 / 18982。真部署由 deploy/deploy.sh 执行，属人执行',
+  });
 }
