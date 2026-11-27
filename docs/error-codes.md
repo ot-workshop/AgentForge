@@ -74,3 +74,28 @@ both codes and the test compares the full code set.
 | S3 | `verify-chain` | tampered line `--json` | exit 1, six keys, `ids` contains `seq:5` |
 | S4 | `run` | `FORGE_FAKE=crash` | exit 2, one stderr line, **no** error event added |
 | S5 | `validate` | `fixtures/p0-unsupported-<field>.yaml --json` | exactly one error, `E_P0_UNSUPPORTED`, `path` names that field |
+
+## Runtime errors (M2-B, #流水线:#9) — notes only
+
+Notes for the four `E_RUNTIME_*` codes the `--runtime <stage>` path produces.
+They are **not** rows of the table above and change no existing row's
+`severity` / fixture column; they can become rows once the acceptance suite has
+a criterion for each. All four follow the v2.4 §2.3 six-key rule
+(`code`, `severity`, `locatable`, `path`, `ids`, `fix`).
+
+- `E_RUNTIME_AUTH` (block, not locatable) — the runtime answered 401; `fix` is
+  `{action, runtime, detail}` and `detail` carries no key material.
+- `E_RUNTIME_QUOTA` (block, not locatable) — the runtime reported a quota or
+  rate limit (429), or one run exceeded `--max-runtime-calls` (default: the
+  number of stages); `fix` is `{action: "stop; …", used, limit}`. A run stops
+  and never continues by itself.
+- `E_RUNTIME_TIMEOUT` (block, not locatable) — a stage exceeded
+  `limits.timeout_s` (default 120 s); `fix` is `{action, stage, timeout_s}` and
+  the runtime's whole process group is killed.
+- `E_RUNTIME_UNAVAILABLE` (block, not locatable) — the binary could not start,
+  exited non-zero for another reason, or refused the task book; `fix` is
+  `{action, detail}`.
+
+A real runtime's Submit whose `evidence[].cmd` or `check` holds a URL is
+`E_SCHEMA_INVALID` with `path` at that evidence entry: the runtime goes to the
+network, the products may not depend on it.

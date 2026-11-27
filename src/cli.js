@@ -19,7 +19,9 @@ const USAGE = `forge <command> [options]
   append --run <run_id> --event-file <jsonl>  经锁与哈希链追加事件（A5.3）
   serve [--port <n>]                          Live（/healthz /snapshot /events）
   validate <flow.yaml> [--json]          块按 FORGE_ROOT，否则流程文件所在仓库
-  run --run <run_id> --flow <path>
+  run --run <run_id> --flow <path> [--runtime design] [--max-runtime-calls <n>]
+                                             （--runtime design：只有 design 阶段改用本机真运行时，
+                                               会出网、会产生模型调用；不给就是原来的假执行器）
 `;
 
 function parseArgs(argv) {
@@ -141,14 +143,39 @@ export async function main(argv = process.argv.slice(2)) {
             };
           }
         }
+        // M2-B: the real runtime is opt-in. Without `--runtime`, nothing about
+        // this path changes: the fake runner runs all three stages, no network.
+        const runtimeStage = opts.runtime && opts.runtime !== true ? String(opts.runtime) : null;
+        if (opts.runtime === true || (runtimeStage && runtimeStage !== 'design')) {
+          throw {
+            errors: [
+              structuredError({ code: 'E_INVALID_ARGS', severity: 'block', locatable: false, path: '--runtime', ids: [], fix: { action: '--runtime takes one stage name; M2-B only supports --runtime design', supported: ['design'] } }),
+            ],
+            exitCode: 1,
+          };
+        }
+        const maxCalls = opts['max-runtime-calls'] === undefined || opts['max-runtime-calls'] === true ? undefined : Number(opts['max-runtime-calls']);
+        if (maxCalls !== undefined && (!Number.isInteger(maxCalls) || maxCalls < 1)) {
+          throw {
+            errors: [
+              structuredError({ code: 'E_INVALID_ARGS', severity: 'block', locatable: false, path: '--max-runtime-calls', ids: [], fix: { action: 'pass a positive integer' } }),
+            ],
+            exitCode: 1,
+          };
+        }
         const res = await runLinear({
           rootDir: root(),
           flowPath,
           fake: process.env.FORGE_FAKE ?? null,
           runId: opts.run && opts.run !== true ? String(opts.run) : undefined,
           allowDrift: !!opts['allow-drift'],
+          runtime: runtimeStage ? { stage: runtimeStage, bin: process.env.FORGE_RUNTIME_BIN || 'opencode' } : null,
+          maxRuntimeCalls: maxCalls,
         });
-        if (res.exitCode !== 0 && json && res.error) emitErrors([res.error], true);
+        // One shape for both modes: -e prints a JSON error object; plain forks
+        // print the `code: path` line (as before). A beforeWrite refusal has no run
+        // dir, so this is the only way the caller learns why nothing ran.
+        if (res.exitCode !== 0 && res.error && (json || res.beforeWrite)) emitErrors([res.error], json);
         return res.exitCode;
       }
       case 'validate': {

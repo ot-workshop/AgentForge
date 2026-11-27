@@ -15,6 +15,40 @@ Status: **draft, not pushed**. This tree is the working copy of @员工三号.
 - `src/serve.js` — Live: `/healthz`, `/snapshot`, `/events?since=N` (SSE), plus the M2-A canvas routes below.
 - `test/` — A1, A2.1/A2.2/A2.4, A4.1/A4.3, A5.2/A5.4/A5.5/A5.8/A5.9/A5.11/A5.12.
 
+## Real runtime for the design stage (M2-B, opt-in)
+
+By default every stage still runs the fake runner (`fixtures/fake-runner.js`);
+nothing new runs and nothing goes to the network. `--runtime design` replaces
+**only** the design stage with a real agent runtime, for that one invocation:
+
+```
+node bin/forge.js run --flow flows/main.yaml --runtime design [--max-runtime-calls <n>]
+```
+
+- **This leaves the machine and costs model calls.** The adapter
+  (`fixtures/design-runtime.js`, `src/runtime/design.js`) starts
+  `opencode run --archived --format json` (binary: `FORGE_RUNTIME_BIN`, default
+  `opencode`); opencode uses its own login state. Forge itself reads, prints and
+  forwards no credential.
+- Input: a task book (JSON on stdin: run id, stage, request, flow doc, absolute
+  run dir, timeout). Output: one Submit on stdout, checked like the fake
+  runner's, plus one extra rule: evidence must name a command or a path, never a
+  URL. build/verify stay on the fake runner.
+- `limits.timeout_s` in `agents/architect.yaml` (default 120 s) is a hard
+  timeout; on expiry the runtime's whole process group is killed
+  (`E_RUNTIME_TIMEOUT`). At most `--max-runtime-calls` runtime calls per run
+  (default: the number of stages) — over the cap the run stops with
+  `E_RUNTIME_QUOTA` and never continues by itself.
+- Failures: `E_RUNTIME_AUTH` (401 / invalid key), `E_RUNTIME_QUOTA` (429 / rate
+  limit), `E_RUNTIME_UNAVAILABLE` (anything else, or a runtime that dies
+  without a structured answer — then it is a crash: exit 2).
+- `--runtime` without `--flow` is refused (`E_FILE_NOT_FOUND`, exit 1) before a
+  run directory exists: the real runtime never runs the default stages.
+- Note: opencode resolves tool commands against the directory it was *started*
+  in, not the adapter's cwd. The adapter therefore writes the absolute run-dir
+  path into the task book, and the plan is still judged by the evidence in the
+  Submit (`plan-written`), never by the runtime's own claim that it wrote it.
+
 ## Canvas prototype (M2-A)
 
 `node bin/forge.js serve`, then open `http://127.0.0.1:8787/ui` (the static

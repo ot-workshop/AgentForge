@@ -3,7 +3,7 @@
 // real agent until M2. Every state change is written by the orchestrator only.
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn as spawnRuntime } from 'node:child_process';
 import { EventWriter, readEvents } from './eventlog.js';
 import { acquireRunLock } from './lock.js';
 import { sha256Hex } from './chain.js';
@@ -28,9 +28,19 @@ export function recordFlowPath(flowPath, rootDir) {
   return rel.split(path.sep).join('/');
 }
 
-export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, allowDrift }) {
+export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, allowDrift, runtime = null, maxRuntimeCalls }) {
   const flowPath = flowInput == null ? null : path.resolve(flowInput);
   const flowRecord = flowPath == null ? null : recordFlowPath(flowPath, rootDir);
+  // M2-B: a real runtime never runs the default stages. Refused here, before the
+  // root check, the drift check, the lock or any event: nothing is created.
+  if (runtime && flowPath == null) {
+    return {
+      exitCode: 1,
+      runId: runId ?? null,
+      beforeWrite: true,
+      error: structuredError({ code: 'E_FILE_NOT_FOUND', severity: 'block', locatable: false, path: '--flow', ids: [], fix: { action: 'pass --flow <existing flow file>; the real runtime never runs the default stages' } }),
+    };
+  }
   if (flowPath && flowRecord === null) {
     throw {
       errors: [
@@ -46,7 +56,20 @@ export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, all
       exitCode: 1,
     };
   }
-  const { stages, blocks } = loadFlow(flowPath);
+  const { stages, blocks, doc } = loadFlow(flowPath);
+  // M2-B: the real runtime may only replace a stage the flow actually has.
+  if (runtime && !stages.includes(runtime.stage)) {
+    return {
+      exitCode: 1,
+      runId: runId ?? null,
+      beforeWrite: true,
+      error: structuredError({ code: 'E_INVALID_ARGS', severity: 'block', locatable: false, path: flowRecord ?? flowPath, ids: [], fix: { action: `--runtime ${runtime.stage} needs a node with that id in the flow`, stages } }),
+    };
+  }
+  // Hard cap on real-runtime invocations in one run (#9 b7d37ffa): the default
+  // equals the number of stages; a run never auto-resumes past it.
+  const quota = Number.isInteger(maxRuntimeCalls) && maxRuntimeCalls > 0 ? maxRuntimeCalls : stages.length;
+  let runtimeCalls = 0;
   const runsDir = path.join(rootDir, '.forge', 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
   const id = runId ?? new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14) + '-' + Math.random().toString(16).slice(2, 6);
@@ -160,7 +183,16 @@ export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, all
       const checksFile = path.join(runDir, 'checks.lock');
       fs.writeFileSync(checksFile, CHECKER_CONTENT);
       const checksShaBefore = sha256Hex(fs.readFileSync(checksFile));
-      const res = invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs: writer.nextSeq - 1, runId: id, checksFile });
+      let res;
+      if (runtime?.stage === stage && runtimeCalls + 1 <= quota) {
+        runtimeCalls += 1;
+        res = await invokeRuntime({ runtime, rootDir, doc, runDir, stage, iteration, prevSeqs: writer.nextSeq - 1, runId: id });
+      } else if (runtime?.stage === stage) {
+        // Over the cap: stop here instead of calling the runtime again.
+        res = { submit: null, submitError: structuredError({ code: 'E_RUNTIME_QUOTA', severity: 'block', locatable: false, path: `runs/${id}/events.jsonl#${stage}`, ids: [`stage:${stage}`], fix: { action: 'stop; raise --max-runtime-calls only deliberately', used: runtimeCalls, limit: quota } }) };
+      } else {
+        res = invokeRunner({ rootDir, flowPath, fake, runDir, stage, iteration, prevSeqs: writer.nextSeq - 1, runId: id, checksFile });
+      }
       let checksShaAfter = sha256Hex(fs.readFileSync(checksFile));
       const checksWritten = checksShaAfter !== checksShaBefore;
       if (checksWritten) {
@@ -181,7 +213,12 @@ export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, all
       let status = 'ok';
       let error = null;
       const ev = res.submit?.evidence;
-      if (!res.illegalEvent && !res.submitError && (!Array.isArray(ev) || ev.length === 0)) {
+      // A real runtime's classified error (E_RUNTIME_*, E_SCHEMA_INVALID from
+      // its Submit check) is recorded as-is instead of being re-wrapped.
+      if (res.submitError) {
+        status = 'failed';
+        error = res.submitError;
+      } else if (!res.illegalEvent && (!Array.isArray(ev) || ev.length === 0)) {
         status = 'failed';
         error = structuredError({
           code: 'E_MISSING_EVIDENCE',
@@ -264,10 +301,120 @@ export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, all
   }
 }
 
+const DEFAULT_RUNTIME_TIMEOUT_S = 120;
+const RUNTIME_EVIDENCE_URL = /\b(?:https?|ftp|wss?):\/\//i;
+
+// M2-B (#流水线:#9): run one stage on the real runtime through
+// fixtures/design-runtime.js, started the way fixtures/fake-runner.js is (cwd =
+// run dir, task book on stdin, one Submit JSON on stdout, the same crash
+// contract: a non-zero exit without an answer is a crash, exit 2). The adapter
+// is async and gets a hard timeout; its whole process group is killed on
+// timeout, on adapter failure, or when the orchestrator is interrupted.
+async function invokeRuntime({ runtime, rootDir, doc, runDir, stage, iteration, prevSeqs, runId }) {
+  const unavailable = (detail, action = 'retry-stage') =>
+    structuredError({ code: 'E_RUNTIME_UNAVAILABLE', severity: 'block', locatable: false, path: 'runtime', ids: [`stage:${stage}`], fix: { action, detail: String(detail).slice(-800) } });
+  const adapter = path.join(rootDir, 'fixtures', 'design-runtime.js');
+  if (!fs.existsSync(adapter)) return { submitError: unavailable('fixtures/design-runtime.js is missing', 'check out the M2-B files'), submit: null };
+  const specPath = path.join(rootDir, 'agents', 'architect.yaml');
+  let spec = null;
+  try { spec = parseYaml(fs.readFileSync(specPath, 'utf8'), specPath); } catch { spec = null; }
+  const t = spec?.limits?.timeout_s;
+  const timeoutS = Number.isInteger(t) && t > 0 ? t : DEFAULT_RUNTIME_TIMEOUT_S;
+  // The run id is also the run directory name and names the artifact path.
+  if (path.basename(runId) !== runId) return { submitError: unavailable('run id must be a plain directory name', 'pass a run id without path separators'), submit: null };
+  const node = doc?.nodes?.find((n) => n.id === stage) ?? {};
+  const task = {
+    v: 1,
+    run_id: runId,
+    stage,
+    iteration,
+    flow_id: doc?.id ?? null,
+    request: String(node.with?.request ?? '').replace(/\{\{input\.request\}\}/g, 'the request in this task'),
+    doc,
+    run_dir: runDir,
+    timeout_s: timeoutS,
+    prev_seq: prevSeqs,
+  };
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const child = spawnRuntime(process.execPath, [adapter, stage], {
+      cwd: runDir,
+      env: { ...process.env, FORGE_RUNTIME_BIN: runtime.bin, FORGE_RUNTIME_STAGE: stage, FORGE_RUN_ID: runId },
+      detached: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const killTree = () => {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree();
+    }, timeoutS * 1000);
+    const onSignal = () => killTree();
+    process.once('SIGINT', onSignal);
+    process.once('SIGTERM', onSignal);
+    const finish = (result) => {
+      clearTimeout(timer);
+      process.removeListener('SIGINT', onSignal);
+      process.removeListener('SIGTERM', onSignal);
+      resolve(result);
+    };
+    child.on('error', (e) => finish({ submitError: unavailable(e.code ?? e.message, 'install the runtime or check FORGE_RUNTIME_BIN'), submit: null }));
+    child.stdout.on('data', (c) => (stdout += c));
+    child.stderr.on('data', (c) => (stderr += c));
+    child.stdin.on('error', () => { /* the adapter may exit before reading its input */ });
+    child.stdin.end(JSON.stringify(task));
+    child.on('close', (code, signal) => {
+      if (timedOut) {
+        return finish({ submitError: structuredError({ code: 'E_RUNTIME_TIMEOUT', severity: 'block', locatable: false, path: 'runtime', ids: [`stage:${stage}`], fix: { action: 'retry-stage or raise limits.timeout_s', stage, timeout_s: timeoutS } }), submit: null });
+      }
+      if (signal) return finish({ submitError: unavailable(`adapter killed by ${signal}`), submit: null });
+      const start = stdout.indexOf('{');
+      let submit = null;
+      try { submit = JSON.parse(start >= 0 ? stdout.slice(start) : '{}'); } catch { submit = null; }
+      const runtimeError = submit && submit.runtimeError && submit.runtimeError.code && submit.runtimeError.severity ? submit.runtimeError : null;
+      if (runtimeError) return finish({ submitError: runtimeError, submit: null });
+      if (code === 3) return finish({ submitError: unavailable(stderr.trim() || 'adapter refused the stage', 'check the task book'), submit: null });
+      if (!submit || typeof submit !== 'object' || !('status' in submit)) {
+        if (code !== 0) return finish({ crash: true, stderr: stderr.trim().split('\n')[0] || `runtime exited ${code}` });
+        return finish({ submitError: structuredError({ code: 'E_SCHEMA_INVALID', severity: 'block', locatable: false, path: 'submit', ids: [`stage:${stage}`], fix: { action: 'emit a Submit JSON object with status/artifacts/summary/evidence', detail: String(stderr).slice(-400) } }), submit: null });
+      }
+      const bad = checkRuntimeSubmit(submit, stage);
+      if (bad) return finish({ submitError: bad, submit: null });
+      submit.runtime = { ...(submit.runtime ?? {}), duration_ms: Date.now() - started };
+      finish({ submit });
+    });
+  });
+}
+
+// The rules the fake runner's Submit already meets, plus the one rule for real
+// runtimes (#9 b7d37ffa): evidence names a command or a path, never a URL.
+function checkRuntimeSubmit(submit, stage) {
+  const bad = (fix, where = 'submit') =>
+    structuredError({ code: 'E_SCHEMA_INVALID', severity: 'block', locatable: false, path: where, ids: [`stage:${stage}`], fix });
+  if (!['ok', 'failed', 'blocked'].includes(submit.status)) return bad({ action: 'status must be ok | failed | blocked', field: 'status' });
+  if (!Array.isArray(submit.artifacts) || submit.artifacts.length > 1) return bad({ action: 'artifacts: at most one tree/file entry', field: 'artifacts' });
+  for (const a of submit.artifacts) {
+    if (!a || typeof a.path !== 'string' || !a.path || path.isAbsolute(a.path) || a.path.includes('\0') || a.path.split(/[\\/]/).includes('..') || RUNTIME_EVIDENCE_URL.test(a.path))
+      return bad({ action: 'artifact path must be a relative path inside the run dir', field: 'artifacts' }, 'submit.artifacts');
+  }
+  if (typeof submit.summary !== 'string' || !submit.summary || submit.summary.length > 2000) return bad({ action: 'summary: 1..2000 chars', field: 'summary' });
+  if (!Array.isArray(submit.evidence)) return bad({ action: 'evidence must be an array', field: 'evidence' });
+  for (let i = 0; i < submit.evidence.length; i++) {
+    const e = submit.evidence[i];
+    if (!e || typeof e.check !== 'string' || typeof e.cmd !== 'string' || !Number.isInteger(e.exit)) return bad({ action: 'evidence entries need check/cmd/exit', field: `evidence[${i}]` }, `submit.evidence[${i}]`);
+    if (RUNTIME_EVIDENCE_URL.test(e.cmd) || RUNTIME_EVIDENCE_URL.test(e.check)) return bad({ action: 'evidence must name a command or a file path, not a URL', field: `evidence[${i}].cmd` }, `submit.evidence[${i}]`);
+  }
+  return null;
+}
+
 function loadFlow(flowPath) {
-  if (!flowPath || !fs.existsSync(flowPath)) return { stages: DEFAULT_STAGES, blocks: {} };
+  if (!flowPath || !fs.existsSync(flowPath)) return { stages: DEFAULT_STAGES, blocks: {}, doc: null };
   const doc = parseYaml(fs.readFileSync(flowPath, 'utf8'), flowPath);
-  if (Array.isArray(doc)) return { stages: doc, blocks: {} };
+  if (Array.isArray(doc)) return { stages: doc, blocks: {}, doc: null };
   const nodes = doc.nodes ?? [];
   const blocksRoot = path.join(path.dirname(flowPath), '..', 'blocks');
   const blocks = {};
@@ -277,7 +424,7 @@ function loadFlow(flowPath) {
     const f = path.join(blocksRoot, m[1], `v${m[2]}.yaml`);
     blocks[n.id] = { ref: n.uses, sha256: fs.existsSync(f) ? sha256Hex(fs.readFileSync(f)) : null, file: f, with: n.with ?? {} };
   }
-  return { stages: nodes.map((n) => n.id), blocks };
+  return { stages: nodes.map((n) => n.id), blocks, doc };
 }
 
 function writeManifest(runDir, { runId, flowPath, flowRecord, blocks, status, runStartedAt, drift }) {
