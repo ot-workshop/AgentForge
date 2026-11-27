@@ -34,10 +34,12 @@ function scratchCopy() {
 const pickOne = (repo) => runSuite(repo);
 
 // `forge run --flow` now takes a path inside the project root (#10): a flow in the
-// repo itself is "outside" a scratch FORGE_ROOT. These tests therefore copy flows/
-// into the scratch root and run from there.
+// repo itself is "outside" a scratch FORGE_ROOT. These tests therefore copy flows/ --
+// and blocks/, agents/, checks/, because since #10 `run` validates the flow first and
+// a flow whose blocks/ it cannot find is refused (E_UNKNOWN_REF) -- into the scratch
+// root and run from there.
 function seedRun(repo, root, runId = 'linear-golden') {
-  fs.cpSync(path.join(repo, 'flows'), path.join(root, 'flows'), { recursive: true });
+  for (const d of ['flows', 'blocks', 'agents', 'checks']) fs.cpSync(path.join(repo, d), path.join(root, d), { recursive: true });
   return spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', runId, '--flow', 'flows/main.yaml'], {
     cwd: root,
     env: { ...process.env, FORGE_ROOT: root },
@@ -63,7 +65,8 @@ test('V1.1 goes red when the library validator disagrees with the CLI', () => {
     // must catch as a red row rather than paper over.
     const f = path.join(dir, 'src', 'validate.js');
     const src = fs.readFileSync(f, 'utf8');
-    const patched = src.replace("errors.push(code('E_CYCLE', { path: `${file}#${cycle[0][0]}`", "void ({ path: `${file}#${cycle[0][0]}`");
+    // #14 rewrote the cycle rule (per SCC): drop the E_CYCLE it emits per SCC.
+    const patched = src.replace("    errors.push(code('E_CYCLE', { path: `${file}#${ids[0]}`", "    void ({ path: `${file}#${ids[0]}`");
     assert.notEqual(patched, src, 'patch point not found');
     fs.writeFileSync(f, patched);
     // Equal verdicts (true) but invalid flows no longer refused: the red probes

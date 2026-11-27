@@ -25,7 +25,8 @@ fails, `2` usage error. It never writes into `<checkout>`: every probe that need
 | `V1.2a replay==incremental==从头` | 全程事件可回放 | frozen run: replay == incremental(0) == events.jsonl（经 `src/project.js` 投影后逐行相等）, `--since 2` == the tail, row count == `freeze.json`（该样例冻结时的 sha256/条数；记录了 `flowPath` 时，`manifest.flow.path` 与 `run.start.payload.flow` 也必须等于它——入口从绝对路径改成相对路径后，旧样例会现形）。判定入口可换：`AF_FROZEN_DIR=<dir>` 指任何含 `.forge/runs/<run>/events.jsonl` 的目录。 冻结样例只入 `events.jsonl` + `manifest.json`（员工一号 820539da：`context/`、`checks.lock`、`.events-lock` 一律不入） |
 | `V1.2b 失败定位到阶段` | 中途失败能定位阶段与原因 | `stage.end.status=failed` on the failing stage, visible in `/snapshot` |
 | `V1.3 越权被拦` | 权限边界由编排器强制 | a runner that rewrites the checker is refused (`E_PERMISSION_GAP`) |
-| `V1.4 分支与有限循环` | 循环/分支，上限是硬限制 | 未验 until #10 lands |
+| `V1.4 分支与有限循环` | 循环/分支，上限是硬限制 | 19 条断言 + 7 个反例（员工一号 a9d63f5a / 79faf4a2 / 971e72b6 / f6e0189b），全部在仓外副本里跑：无上限回边 → 只 `E_CYCLE`（带节点 ids），CLI == 库；`run` 拒被拦的流程时不留 run 目录；`loop-bounded.yaml` + `FORGE_FAKE=retry-verify:2` 真跑 `goto 1,2` + `design@1…ops@1` + `run.end ok`，goto.iteration 与目标下一次 `stage.start.iteration` 配对；`snapshot` 八格不覆盖；`retry-verify:9` 无 `on_exhausted` → `run.end failed/E_LIMIT_UNBOUNDED`（loopId/iterations/fix），有 → 一条 `loop-exhausted` log + `run.end ok`；分支两个方向各走各的边；M3 同一阶段再次进入是新格子（`build@1`→`build@2`、`design@1`→`design@2`）、M4 `on: fail` 与普通边同时可选时选 `on`。7 个反例（超限不再拦、goto 从 0 起、run 不再先校验、on 不参与选边、`on_exhausted` 不收尾、`iteration` 不累加、校验器放宽）各自转红，`src/` 一个字不改 |
+| `V1.4f 冻结样例 loop-bounded` | 有界循环可重放 | `frozen/loop-bounded/`（`4de2dea4` 上 `FORGE_FAKE=retry-verify:2` 真跑 20 条事件）：条数/sha256/flow 路径对 `freeze.json`；重跑后**只比**事件类型顺序、`stage.end.status`、`(stage,iteration)`、`flow.goto` 的 from/to/iteration/loopId/checkResultId、`run.end`；**不比** `ts`/`hash`/`prev`/`stage.start.payload.contextSha256`（它是对 `{runId,stage,iteration,prevArtifacts}` 取 sha，`runId` 是 run 目录名——员工一号 918356de、员工二号 83e69916；跨目录逐字节相等是 M3 的事）。3 个反例（改一轮 status、删第 2 个 goto、改 run.end）各自转红 |
 | `V1.5 人只在两端` | agent 不能自己宣布通过 | **负向判据**（员工一号 820539da）：一次正常 run 里没有 `actor.kind=human` / `type` 以 `accept` 结尾的事件，`manifest` 没有 accepted 字段，`src/` 没有写这类事件的代码路径。正向那一半（人工验收命令）等 #9 第 3 块落地再补 |
 | `D1 deploy-scripts-substantive` | 部署段复用 `deploy.sh` + `acceptance.sh` | `bash -n` clean **and** the scripts still contain what they claim (`deploy-report-`, `merge-base --is-ancestor`, `/healthz` `/snapshot` `/events`) |
 | `D2 serves-healthz-snapshot-events` | 起一次真服务 | calls `deploy/ci/serve_probe.sh` (员工四号) on a scratch copy: free port, `/healthz`, `/snapshot`, `/events?run=…` first frame `run.start`, then it stops the server |
@@ -65,3 +66,15 @@ person, never by this suite.
 `freeze.json` is written once at freeze time and is the authority on "how many
 events, and which flow shape" the sample had; a sample taken on a different entry
 shape shows up as `MISMATCH`, not as a pass.
+
+`tools/acceptance/frozen/loop-bounded/` holds a second sample produced on base
+`4de2dea4` with `FORGE_FAKE=retry-verify:2 forge run --run loop-bounded --flow
+fixtures/loop-bounded.yaml` (20 events, the real bounded loop):
+`runs/loop-bounded/events.jsonl` + `manifest.json` + `freeze.json`. It is judged by
+`V1.4f` on the flow's own fields only -- event type order, `stage.end.status`,
+`(stage, iteration)`, `flow.goto` `from/to/iteration/loopId/checkResultId`, and
+`run.end` -- and deliberately **not** on `ts`, `hash`, `prev` or
+`stage.start.payload.contextSha256`: the last one is `sha256({runId, stage,
+iteration, prevArtifacts})`, and `runId` is the run directory's name, so it is a
+property of the run, not of the flow (员工一号 918356de, 员工二号 83e69916). Byte
+equality across directories is M3's job.

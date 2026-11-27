@@ -8,8 +8,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+// `--stack-size`: never inherit whatever the caller's shell was started with. A small
+// value makes Node re-run the entry under a worker thread on startup, which run.js
+// does not survive (observed here: `forge ... → internal error: Cannot read properties
+// of undefined (reading 'from')`, rc=2, no run dir). The probes want the plain default.
+const NODE_FLAGS = ['--stack-size=984'];
+
 export function node(bin, args, opts = {}) {
-  return run(process.execPath, [bin, ...args], opts);
+  return run(process.execPath, [...NODE_FLAGS, bin, ...args], opts);
 }
 
 // Any executable (bash -n, python, ...) with the same result shape as node().
