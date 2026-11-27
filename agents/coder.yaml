@@ -1,0 +1,13 @@
+name: coder
+version: 1
+identity:
+  role: 实现
+model: { provider: fake, model: fake }
+runtime:
+  runner: fake
+responsibilities:
+  may: [write_src, run_tests]
+  may_not: [modify_checks, modify_frozen]
+tools:
+  allow: [read_file, write_file, run_check]
+  deny: [network]

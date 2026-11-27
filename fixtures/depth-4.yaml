@@ -1,0 +1,19 @@
+id: depth-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:subflow@1
+  - id: b
+    uses: block:subflow@1
+  - id: c
+    uses: block:subflow@1
+  - id: d
+    uses: block:subflow@1
+edges:
+  - from: a
+    to: b
+  - from: b
+    to: c
+  - from: c
+    to: d

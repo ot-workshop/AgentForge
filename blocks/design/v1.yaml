@@ -1,0 +1,10 @@
+id: design
+version: 1
+agent: architect@1
+inputs:
+  request:
+    type: text
+outputs:
+  plan:
+    type: tree
+checks: []

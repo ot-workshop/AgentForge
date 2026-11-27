@@ -1,0 +1,12 @@
+id: verify
+version: 1
+agent: reviewer@1
+inputs:
+  patch:
+    type: tree
+outputs:
+  report:
+    type: file
+checks:
+  - name: accept
+    run: node checks/accept.mjs

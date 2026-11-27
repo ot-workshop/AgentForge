@@ -1,0 +1,11 @@
+id: build
+version: 1
+agent: coder@1
+inputs:
+  plan:
+    type: tree
+
+outputs:
+  patch:
+    type: tree
+checks: []

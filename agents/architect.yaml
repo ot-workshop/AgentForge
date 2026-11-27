@@ -1,0 +1,12 @@
+name: architect
+version: 1
+identity:
+  role: 需求拆解
+model: { provider: fake, model: fake }
+runtime:
+  runner: fake
+responsibilities:
+  may: [read_request]
+  may_not: [modify_checks]
+tools:
+  allow: [read_file]

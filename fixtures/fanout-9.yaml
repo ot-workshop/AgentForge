@@ -1,0 +1,54 @@
+id: fanout-demo
+version: 1
+entry: n0
+nodes:
+  - id: n0
+    uses: block:test@1
+    with:
+      request: r
+  - id: n1
+    uses: block:ops@1
+  - id: n2
+    uses: block:ops@1
+  - id: n3
+    uses: block:ops@1
+  - id: n4
+    uses: block:ops@1
+  - id: n5
+    uses: block:ops@1
+  - id: n6
+    uses: block:ops@1
+  - id: n7
+    uses: block:ops@1
+  - id: n8
+    uses: block:ops@1
+  - id: n9
+    uses: block:ops@1
+edges:
+  - id: e-start
+    from: n0
+    to: n1
+  - id: e2
+    from: n0
+    to: n2
+  - id: e3
+    from: n0
+    to: n3
+  - id: e4
+    from: n0
+    to: n4
+  - id: e5
+    from: n0
+    to: n5
+  - id: e6
+    from: n0
+    to: n6
+  - id: e7
+    from: n0
+    to: n7
+  - id: e8
+    from: n0
+    to: n8
+  - id: e9
+    from: n0
+    to: n9

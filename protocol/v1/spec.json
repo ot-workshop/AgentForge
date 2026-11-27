@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forge.protocol/v1/spec.json",
+  "title": "AgentForge AgentSpec (agents/<name>.yaml, versioned)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "version", "identity", "model", "runtime", "responsibilities", "tools"],
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "group": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role"],
+      "properties": {
+        "role": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "reasoning": { "enum": ["minimal", "low", "medium", "high"] }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runner"],
+      "properties": {
+        "runner": { "enum": ["fake", "claude-code", "codex", "cli", "http"] }
+      }
+    },
+    "responsibilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "may": { "type": "array", "items": { "type": "string" } },
+        "may_not": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": { "type": "array", "items": { "type": "string" } },
+        "deny": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "context": { "type": "object" },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_s": { "type": "integer", "minimum": 1 },
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "token_budget": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

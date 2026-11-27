@@ -1,0 +1,172 @@
+{
+  "blocks": [
+    {
+      "ref": "block:bad-check@1",
+      "id": "bad-check",
+      "version": 1,
+      "agent": "reviewer@1",
+      "inputs": {},
+      "outputs": {
+        "out": {
+          "type": "file"
+        }
+      },
+      "checks": [
+        {
+          "name": "does-not-exist",
+          "run": "node checks/does-not-exist.mjs"
+        }
+      ],
+      "subflow": null
+    },
+    {
+      "ref": "block:build@1",
+      "id": "build",
+      "version": 1,
+      "agent": "coder@1",
+      "inputs": {
+        "plan": {
+          "type": "tree"
+        }
+      },
+      "outputs": {
+        "patch": {
+          "type": "tree"
+        }
+      },
+      "checks": [],
+      "subflow": null
+    },
+    {
+      "ref": "block:checker-missing@1",
+      "id": "checker-missing",
+      "version": 1,
+      "agent": "reviewer@1",
+      "inputs": {},
+      "outputs": {
+        "out": {
+          "type": "file"
+        }
+      },
+      "checks": [
+        {
+          "name": "does-not-exist",
+          "run": "node checks/does-not-exist.mjs"
+        }
+      ],
+      "subflow": null
+    },
+    {
+      "ref": "block:design@1",
+      "id": "design",
+      "version": 1,
+      "agent": "architect@1",
+      "inputs": {
+        "request": {
+          "type": "text"
+        }
+      },
+      "outputs": {
+        "plan": {
+          "type": "tree"
+        }
+      },
+      "checks": [],
+      "subflow": null
+    },
+    {
+      "ref": "block:needs-network@1",
+      "id": "needs-network",
+      "version": 1,
+      "agent": "reviewer@1",
+      "inputs": {},
+      "outputs": {
+        "out": {
+          "type": "file"
+        }
+      },
+      "checks": [],
+      "subflow": null
+    },
+    {
+      "ref": "block:ops@1",
+      "id": "ops",
+      "version": 1,
+      "agent": "reviewer@1",
+      "inputs": {
+        "report": {
+          "type": "file",
+          "required": false
+        }
+      },
+      "outputs": {
+        "merged": {
+          "type": "file"
+        }
+      },
+      "checks": [],
+      "subflow": null
+    },
+    {
+      "ref": "block:subflow@1",
+      "id": "subflow",
+      "version": 1,
+      "agent": "architect@1",
+      "inputs": {},
+      "outputs": {
+        "out": {
+          "type": "tree"
+        }
+      },
+      "checks": [],
+      "subflow": "flows/main.yaml"
+    },
+    {
+      "ref": "block:test@1",
+      "id": "test",
+      "version": 1,
+      "agent": "reviewer@1",
+      "inputs": {
+        "request": {
+          "type": "text"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "file"
+        }
+      },
+      "checks": [
+        {
+          "name": "repro",
+          "run": "node checks/unit.mjs"
+        }
+      ],
+      "subflow": null
+    },
+    {
+      "ref": "block:verify@1",
+      "id": "verify",
+      "version": 1,
+      "agent": "reviewer@1",
+      "inputs": {
+        "patch": {
+          "type": "tree"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "file"
+        }
+      },
+      "checks": [
+        {
+          "name": "accept",
+          "run": "node checks/accept.mjs"
+        }
+      ],
+      "subflow": null
+    }
+  ],
+  "warnings": []
+}

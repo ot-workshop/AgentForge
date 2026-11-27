@@ -1,0 +1,133 @@
+# Error codes (forge.protocol/v1)
+
+Every error emitted by `validate`, `run` and `verify-chain` has exactly six keys:
+`{code, severity, locatable, path, ids[], fix}`. `fix` is a machine-readable next
+step; `null` means "no candidate could be computed" and is written explicitly.
+Uncaught internal crashes are not in this table: exit code 2 + one stderr line.
+
+`severity: block` → exit code 1. `severity: warn` → exit code 0, shown in output.
+
+`class` is one of:
+
+- `rule` — validation rule; has a fixture, or is listed in `# doc-only:` in the tsv.
+- `sequence` — must be produced by an event stream; its criterion is appendix A5.
+- `runtime` — produced at run/request time; its criterion is appendix A2.4/A4.6/A5.12.
+
+### Fixture column `—`, and why
+
+- `E_ILLEGAL_JUMP` [P0.5] — no P0 trigger source: under the back-edge definition,
+  the entry edges of `illegal-jump.yaml` (`start -> b`, `start -> c`) land in the
+  candidate family and cannot be told apart from a legal "enter this loop" edge
+  (v2.4 A12.4; 员工一号 ab6557a6 第 8 条). The tsv keeps `# doc-only:
+  E_ILLEGAL_JUMP`; `fixtures/illegal-jump.yaml` registers `{E_MISSING_EXIT, E_CYCLE}`
+  — same code set as `missing-exit.yaml`, a different shape (one loop with two
+  back edges, both unbounded).
+- `E_LIMIT_UNBOUNDED` — produced by the **runtime** only: a loop that jumps more
+  than `max_iterations` times ends with `stage.end status=failed` and this code
+  (rc=1). The validator does not emit it (`# doc-only: E_LIMIT_UNBOUNDED`): a loop
+  on which a back edge lacks a positive integer `max_iterations` is `E_CYCLE`, and
+  a 100000 bound is a large value, not an unbounded one (#流水线:#10).
+
+`E_CYCLE` is decided per strongly connected component (#流水线:#10, 员工一号 第 13 条
+aadab14f): a back edge already carrying a positive integer `max_iterations` is
+taken first, then the first edge whose removal leaves one endpoint reaching the
+other; if any back edge so taken lacks a positive integer `max_iterations` the SCC
+reports one `E_CYCLE` and `ids` is the closed node list starting at that back
+edge's source (`[a, b, a]`, every step a real edge). A self-loop without a
+positive integer `max_iterations` is `E_CYCLE` with `ids: ["u","u"]`.
+
+#流水线:#10 第 15 条 (员工一号 a9da62b8): one loop is closed by one back edge; two
+loops that share a single back edge are bounded by the runtime's counter (the
+same `loopId`, stop when exhausted), not by the validator, because the graph
+cannot tell "two loops sharing a counter" apart from "one loop that forks and
+joins". `fixtures/loop-two-bounded.yaml` is the compliant way to write it (each
+loop has its own bounded back edge, `{}`); it is not part of the tsv.
+
+`E_MISSING_EXIT` and `E_CYCLE` are inseparable in a finite P0 graph: if every node
+has an outgoing edge, the graph must contain a cycle; `missing-exit.yaml` registers
+both codes and the test compares the full code set.
+
+`LOOP_LIMIT_SUSPECT_THRESHOLD = 1000` is defined here only; the validator and
+`fixtures/expected-codes.tsv` derive from this file.
+
+| code | severity | locatable | fix | class | fixture |
+|---|---|---|---|---|---|
+| `E_SCHEMA_INVALID` | block | false | `{action, path}` | rule | `fixtures/broken-yaml.yaml` |
+| `E_UNKNOWN_REF` | block | false | `{ref, refKind, available[]}` | rule | `fixtures/missing-check.yaml` |
+| `E_CYCLE` | block | true | `{cycle: [ids]}` | rule | `fixtures/cycle.yaml` |
+| `E_ILLEGAL_JUMP` | block | true | `{from, to}` | rule | — |
+| `E_UNREACHABLE` | block | true | `{nodeId}` | rule | `fixtures/unreachable.yaml` |
+| `E_MISSING_ENTRY` | block | false | `{action}` | rule | `fixtures/missing-entry.yaml` |
+| `E_MISSING_EXIT` | block | false | `{action}` | rule | `fixtures/missing-exit.yaml` |
+| `E_CONTRACT_MISMATCH` | block | true | `{from:{nodeId,output}, to:{nodeId,input}, expected, actual}` | rule | `fixtures/contract-mismatch.yaml` |
+| `E_CONTRACT_MISMATCH` | block | true | `{from:{nodeId,output}, to:{nodeId,input}, expected, actual}` | rule | `fixtures/contract-vs-unbound.yaml` |
+| `E_CONTRACT_MISMATCH` | block | true | `{from:{nodeId,output}, to:{nodeId,input}, expected, actual}` | rule | `fixtures/contract-unresolved-ref.yaml` |
+| `E_UNBOUND_INPUT` | block | true | `{input, slotOf, reason, candidates[]}` | rule | `fixtures/unbound-input.yaml` |
+| `E_UNBOUND_INPUT` | block | true | `{input, slotOf, reason, candidates[]}` | rule | `fixtures/contract-unbound-only.yaml` |
+| `E_UNBOUND_INPUT` | block | true | `{input, slotOf, reason, candidates[]}` | rule | `fixtures/p0-unsupported-on.yaml` |
+| `E_PERMISSION_GAP` | block | true | `{tool, requiredBy, agentSpec, suggestAddTo}` | rule | `fixtures/permission-gap.yaml` |
+| `E_CHECKER_NOT_FOUND` | block | true | `{check, searched[]}` | rule | `fixtures/checker-not-found.yaml` |
+| `E_GATE_NO_APPROVER` | block | true | `{gate}` | rule | `fixtures/gate-no-approver.yaml` |
+| `E_LIMIT_UNBOUNDED` | block | false | `{action, loop_id, max_iterations}` | runtime | — |
+| `E_FANOUT_EXCEEDED` | block | true | `{nodeId, fanout, max}` | rule | `fixtures/fanout-9.yaml` |
+| `E_NODE_COUNT_EXCEEDED` | block | false | `{count, max}` | rule | `fixtures/nodes-101.yaml` |
+| `E_DEPTH_EXCEEDED` | block | false | `{depth, max}` | rule | `fixtures/depth-4.yaml` |
+| `E_P0_UNSUPPORTED` | block | true | `{field, reason: "field is P0.5"}` | rule | `fixtures/p0-unsupported-max_iterations.yaml` |
+| `E_P0_UNSUPPORTED` | block | true | `{field, reason: "field is P0.5"}` | rule | `fixtures/p0-unsupported-group.yaml` |
+| `E_P0_UNSUPPORTED` | block | true | `{field, reason: "field is P0.5"}` | rule | `fixtures/p0-unsupported-loop_id.yaml` |
+
+Since #流水线:#10 the edge-level fields `on`, `max_iterations` and `on_exhausted`
+are P0 (the validator checks `on` shape and loop bounds); `loop_id` and `group`
+stay P0.5, and a flow-level `limits.max_iterations` stays P0.5 as well.
+`fixtures/p0-unsupported-on.yaml` therefore now registers `E_UNBOUND_INPUT` (its
+`on` is accepted; its node has nothing upstream for `plan`).
+`fixtures/contract-vs-unbound.yaml` shows cb43dbad 第 2 条: a node with a seam
+error is named once by `E_CONTRACT_MISMATCH`, not also by `E_UNBOUND_INPUT`.
+| `E_BLOCK_CONTENT_DRIFT` | block | false | `{block, recordedSha256, actualSha256}` | sequence | — |
+| `E_FLOW_CONTENT_DRIFT` | block | false | `{flow, recordedSha256, actualSha256}` | sequence | — |
+| `E_EVENT_CORRUPT` | block | false | `{action, detail}` | sequence | — |
+| `E_CHAIN_HASH_MISMATCH` | block | false | `{action, recordedHash}` | sequence | — |
+| `E_EVENT_SEQ_GAP` | block | false | `{action, expectedSeq, actualSeq}` | sequence | — |
+| `E_REF_DRIFT_ORDER` | block | false | `{action}` | sequence | — |
+| `E_ILLEGAL_STAGE_WRITE` | block | false | `{action}` | sequence | — |
+| `E_STAGE_FAILED` | block | false | `{action, hint}` | sequence | — |
+| `E_EVENTS_LOCKED` | block | false | `{action}` | runtime | — |
+| `E_INVALID_QUERY` | block | false | `{action}` | runtime | — |
+| `E_FILE_NOT_FOUND` | block | false | `{action, path}` | runtime | — |
+| `E_UNKNOWN_RUN` | block | false | `{action, available[]}` | runtime | — |
+| `E_INVALID_ARGS` | block | false | `{action}` | runtime | — |
+
+## Error-structure tests (one list, consumed by the validator unit tests)
+
+| id | entry point | sample | expects |
+|---|---|---|---|
+| S1 | `validate` | `fixtures/cycle.yaml --json` | exit 1, every error has six keys, `fix` present |
+| S2 | `run` | `FORGE_FAKE=no-evidence` | the error in `stage.end.payload.error` has six keys |
+| S3 | `verify-chain` | tampered line `--json` | exit 1, six keys, `ids` contains `seq:5` |
+| S4 | `run` | `FORGE_FAKE=crash` | exit 2, one stderr line, **no** error event added |
+| S5 | `validate` | `fixtures/p0-unsupported-<field>.yaml --json` | exactly one error, `E_P0_UNSUPPORTED`, `path` names that field |
+
+## Runtime errors (M2-B, #流水线:#9) — notes only
+
+Notes for the four `E_RUNTIME_*` codes the `--runtime <stage>` path produces.
+They are **not** rows of the table above and change no existing row's
+`severity` / fixture column; they can become rows once the acceptance suite has
+a criterion for each. All four follow the v2.4 §2.3 six-key rule
+(`code`, `severity`, `locatable`, `path`, `ids`, `fix`).
+
+- `E_RUNTIME_AUTH` (block, not locatable) — the runtime answered 401; `fix` is
+  `{action, runtime, detail}` and `detail` carries no key material.
+- `E_RUNTIME_QUOTA` (block, not locatable) — the runtime reported a quota or
+  rate limit (429), or one run exceeded `--max-runtime-calls` (default: the
+  number of stages); `fix` is `{action: "stop; …", used, limit}`. A run stops
+  and never continues by itself.
+- `E_RUNTIME_TIMEOUT` (block, not locatable) — a stage exceeded
+  `limits.timeout_s` (default 120 s); `fix` is `{action, stage, timeout_s}` and
+  the runtime's whole process group is killed.
+- `E_RUNTIME_UNAVAILABLE` (block, not locatable) — the binary could not start,
+  exited non-zero for another reason, or refused the task book; `fix` is
+  `{action, detail}`.
+
+A real runtime's Submit whose `evidence[].cmd` or `check` holds a URL is
+`E_SCHEMA_INVALID` with `path` at that evidence entry: the runtime goes to the
+network, the products may not depend on it.

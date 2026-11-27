@@ -1,0 +1,18 @@
+# Linear P0 sample: design -> build -> verify
+id: main
+version: 1
+entry: design
+nodes:
+  - id: design
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: build
+    uses: block:build@1
+  - id: verify
+    uses: block:verify@1
+edges:
+  - from: design
+    to: build
+  - from: build
+    to: verify

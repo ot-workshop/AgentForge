@@ -1,0 +1,7 @@
+id: checker-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:checker-missing@1
+edges: []

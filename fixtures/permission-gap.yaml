@@ -1,0 +1,7 @@
+id: permission-demo
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:needs-network@1
+edges: []
