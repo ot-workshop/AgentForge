@@ -44,9 +44,11 @@ test('A3.2 errors are structured and locatable ids exist in the graph', () => {
 
 test('P0: each p0-unsupported fixture yields exactly one E_P0_UNSUPPORTED naming the field', () => {
   for (const [file, field] of [
-    ['p0-unsupported-on.yaml', 'on'],
+    // Edge-level `on` is P0 since #流水线:#10 (p0-unsupported-on.yaml now validates
+    // to E_UNBOUND_INPUT); node-level `loop_id` and `group` stay P0.5.
     ['p0-unsupported-max_iterations.yaml', 'max_iterations'],
     ['p0-unsupported-group.yaml', 'group'],
+    ['p0-unsupported-loop_id.yaml', 'loop_id'],
   ]) {
     const r = validate('fixtures/' + file);
     assert.equal(r.status, 1);

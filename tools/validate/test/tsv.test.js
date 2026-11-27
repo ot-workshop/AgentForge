@@ -65,8 +65,11 @@ test('a fixture that the md never names is reported even when its code is right'
 test('the placeholder row covers every p0-unsupported-* file in the tsv', () => {
   const { byCode, byFixture, notes } = load();
   const tsv = parseTsv(fs.readFileSync(repo('fixtures/expected-codes.tsv'), 'utf8'));
+  // #流水线:#10: p0-unsupported-on.yaml is P0 now (edge `on` is accepted) and
+  // registers E_UNBOUND_INPUT, so three P0.5-field fixtures remain.
   const p0Files = [...tsv.byFixture.keys()].filter((f) => f.startsWith('p0-unsupported-'));
   assert.equal(p0Files.length, 4);
-  assert.ok(byCode.get('E_P0_UNSUPPORTED').fixtures.some((f) => f.includes('<')), 'the md row is a placeholder');
+  assert.ok(p0Files.filter((f) => f !== 'p0-unsupported-on.yaml').length === 3);
+  assert.ok(byCode.get('E_P0_UNSUPPORTED').fixtures.length === 3, 'one md row per P0.5 field fixture');
   assert.deepEqual(crossCheck(byCode, byFixture, tsv, { notes }), []);
 });

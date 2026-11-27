@@ -22,7 +22,12 @@ test('A3.3 tsv mirrors docs/error-codes.md rule-class rows bidirectionally', () 
     if (r[idx('class')] !== 'rule') continue;
     ruleCodes.add(code);
     const fx = r[idx('fixture')];
-    if (fx.startsWith('`fixtures/')) fixtureCodes.set(code, fx.slice(1, fx.indexOf('`', 1)));
+    if (!fx.startsWith('`fixtures/')) continue;
+    // #流水线:#10: one code may bind several fixtures (E_UNBOUND_INPUT on
+    // unbound-input / contract-unbound-only / p0-unsupported-on). Keep the set.
+    const bound = fixtureCodes.get(code) ?? new Set();
+    bound.add(fx.slice(1, fx.indexOf('`', 1)));
+    fixtureCodes.set(code, bound);
   }
   const tsv = fs
     .readFileSync(path.join(ROOT, 'fixtures', 'expected-codes.tsv'), 'utf8')
@@ -38,20 +43,23 @@ test('A3.3 tsv mirrors docs/error-codes.md rule-class rows bidirectionally', () 
     assert.ok(fs.existsSync(path.join(ROOT, 'fixtures', file)), `${file} named by tsv must exist`);
     // the md binds one fixture per code; a finite P0 graph can carry two codes
     // for the same fixture (missing-exit), so E_CYCLE is exempt from the binding.
-    if (fixtureCodes.has(code) && !fixtureCodes.get(code).includes('<') && code !== 'E_CYCLE' && code !== 'E_MISSING_EXIT') {
-      assert.equal(fixtureCodes.get(code), `fixtures/${file}`, `md binds ${code} to ${fixtureCodes.get(code)}`);
+    // the md binds one fixture per code; a finite P0 graph can carry two codes
+    // for the same fixture (missing-exit), so E_CYCLE is exempt from the binding.
+    const bound = fixtureCodes.get(code);
+    if (bound && ![...bound].some((x) => x.includes('<')) && code !== 'E_CYCLE' && code !== 'E_MISSING_EXIT') {
+      assert.ok(bound.has(`fixtures/${file}`), `md binds ${code} to ${[...bound].join(', ')}`);
     }
   }
   for (const code of ruleCodes) {
-    if (code === 'E_P0_UNSUPPORTED') continue; // one placeholder row, four fixtures
+    if (code === 'E_P0_UNSUPPORTED') continue; // one row per P0.5 field fixture
     const hasFixture = fixtureCodes.has(code);
     // P0.5-only rules have no executable P0 fixture yet; #流水线:#7 owns filling them.
     if (code === 'E_LIMIT_UNBOUNDED') continue;
-    assert.ok(tsvCodes.has(code) || docOnly.has(code) || !hasFixture, `${code} (fixture=${fixtureCodes.get(code) ?? 'none'}) is rule-class but appears in neither tsv nor doc-only`);
+    assert.ok(tsvCodes.has(code) || docOnly.has(code) || !hasFixture, `${code} (fixture=${[...(fixtureCodes.get(code) ?? ['none'])].join(', ')}) is rule-class but appears in neither tsv nor doc-only`);
     if (docOnly.has(code)) assert.ok(!['E_SCHEMA_INVALID', 'E_UNKNOWN_REF', 'E_P0_UNSUPPORTED'].includes(code), `${code} must not be doc-only`);
   }
-  // 05a288b's table had 16 codes; #流水线:#7 makes E_LIMIT_UNBOUNDED P0.5-only
-  // (no P0 fixture for it), so the P0 code count is 15.
+  // 05a288b's table had 16 codes; #流水线:#7 makes E_LIMIT_UNBOUNDED runtime-only
+  // (no validator fixture for it), so the P0 code count stays 15.
   assert.equal(tsvCodes.size, 15);
 });
 

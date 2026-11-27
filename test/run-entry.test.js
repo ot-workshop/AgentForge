@@ -132,8 +132,12 @@ test('#10 pre: validate finds blocks/ from the flow file itself (no FORGE_ROOT n
     assert.equal(inOther.stdout, inRepo.stdout, 'outside cwd and repo root agree byte for byte');
     assert.deepEqual(JSON.parse(inOther.stdout), { errors: [] });
 
-    const bad = spawnSync(process.execPath, [FORGE, 'validate', path.join(root, 'flows/bugfix.yaml'), '--json'], { cwd: other, env, encoding: 'utf8' });
-    const badRepo = spawnSync(process.execPath, [FORGE, 'validate', path.join(root, 'flows/bugfix.yaml'), '--json'], { cwd: ROOT, env, encoding: 'utf8' });
+    // A flow with a defect is judged the same from any cwd; since #流水线:#10
+    // flows/bugfix.yaml is the valid bounded-retry sample, so the defect sample is
+    // contract-mismatch.yaml.
+    const badFile = path.join(root, 'fixtures/contract-mismatch.yaml');
+    const bad = spawnSync(process.execPath, [FORGE, 'validate', badFile, '--json'], { cwd: other, env, encoding: 'utf8' });
+    const badRepo = spawnSync(process.execPath, [FORGE, 'validate', badFile, '--json'], { cwd: ROOT, env, encoding: 'utf8' });
     assert.equal(bad.stdout, badRepo.stdout);
     assert.ok(JSON.parse(bad.stdout).errors.length > 0);
 
