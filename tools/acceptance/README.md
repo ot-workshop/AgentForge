@@ -22,11 +22,11 @@ fails, `2` usage error. It never writes into `<checkout>`: every probe that need
 | `H1 run-positional-arg` | `forge run <file>` 不得静默忽略 | non-zero + `E_INVALID_ARGS`, no run dir created |
 | `H2 flow-path-relative` | `--flow` 写出的路径可跨机重放 | `manifest.flow.path == run.start.payload.flow`, relative to the repo root |
 | `V1.1 人机同门` | 人画的和 agent 写的过同一个校验器，报错指回节点 | CLI verdict == library verdict; a cycle is refused with a node id |
-| `V1.2a replay==incremental==从头` | 全程事件可回放 | frozen run: replay == incremental(0) == events.jsonl, `--since 2` == the tail |
+| `V1.2a replay==incremental==从头` | 全程事件可回放 | frozen run: replay == incremental(0) == events.jsonl, `--since 2` == the tail. 冻结样例只入 `events.jsonl` + `manifest.json`（员工一号 820539da：`context/`、`checks.lock`、`.events-lock` 一律不入） |
 | `V1.2b 失败定位到阶段` | 中途失败能定位阶段与原因 | `stage.end.status=failed` on the failing stage, visible in `/snapshot` |
 | `V1.3 越权被拦` | 权限边界由编排器强制 | a runner that rewrites the checker is refused (`E_PERMISSION_GAP`) |
 | `V1.4 分支与有限循环` | 循环/分支，上限是硬限制 | 未验 until #10 lands |
-| `V1.5 人只在两端` | agent 不能自己宣布通过 | 未验: no machine-checkable carrier in the repo yet |
+| `V1.5 人只在两端` | agent 不能自己宣布通过 | **负向判据**（员工一号 820539da）：一次正常 run 里没有 `actor.kind=human` / `type` 以 `accept` 结尾的事件，`manifest` 没有 accepted 字段，`src/` 没有写这类事件的代码路径。正向那一半（人工验收命令）等 #9 第 3 块落地再补 |
 | `D1 deploy-scripts-substantive` | 部署段复用 `deploy.sh` + `acceptance.sh` | `bash -n` clean **and** the scripts still contain what they claim (`deploy-report-`, `merge-base --is-ancestor`, `/healthz` `/snapshot` `/events`) |
 | `D2 serves-healthz-snapshot-events` | 起一次真服务 | free port from the kernel, `/healthz` ok, `/snapshot` lists the fresh run, `/events?since=0` first frame is `run.start`, then the process is stopped |
 

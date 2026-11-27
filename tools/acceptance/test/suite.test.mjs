@@ -156,4 +156,28 @@ test('D2 goes red when /events stops streaming run.start', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+test('V1.5 goes red when src/ can write a human acceptance event', () => {
+  const dir = scratchCopy();
+  try {
+    const f = path.join(dir, 'src', 'run.js');
+    const s = fs.readFileSync(f, 'utf8');
+    const marker = "    // A resumed run records the (re)start in the same chain instead of replacing it.";
+    assert.ok(s.includes(marker), 'insert point not found');
+    fs.writeFileSync(f, s.replace(marker, `${marker}\n    if (process.env.FORGE_SELFPASS) writer.append({ run_id: id, type: 'run.accept', actor: { kind: 'human', name: 'orchestrator' } });`));
+    const { json } = pickOne(dir);
+    const v15 = json.rows.find((r) => r.id.startsWith('V1.5'));
+    assert.equal(v15.status, 'fail', JSON.stringify(v15.raw));
+    assert.ok(/run\.js/.test(v15.raw), v15.raw);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('V1.5 stays green on a human gate in a flow (a declaration is not an acceptance)', () => {
+  // The src/ scanner must not trip on ref.drift's acceptedBy or on validate.js's
+  // "human gate" wording: those are not run-level acceptance.
+  const { json } = pickOne(REPO);
+  const v15 = json.rows.find((r) => r.id.startsWith('V1.5'));
+  assert.equal(v15.status, 'pass', JSON.stringify(v15.raw));
+});
 });

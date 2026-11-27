@@ -234,12 +234,71 @@ export function v4_loops(ref = process.env.AF_REF ?? 'HEAD') {
 }
 
 // ---------------------------------------------------------------- V5 人只在两端
+// 员工一号 820539da 定的最小载体（不发明新事件类型）：
+//  ①  一次正常跑完的 run 里，没有任何事件的 actor.kind=human，也没有 type 以 accept 结尾；
+//  ②  src/ 里没有任何写这类事件的代码路径（防「写了没触发」）。
+// 这是负向判据：正向那一半（真正的人工验收命令）等 #9 第 3 块落地再补。
 export function v5_humanEnds(repo) {
   const id = `${V}.5 人只在两端`;
-  const standard = 'agent 不能自己宣布通过：通过只能来自确定性的检查';
-  return row(id, standard, 'unverified', ['（待定：需要「人工验收」这一端在仓库里的表示）'], '', {
-    notes: '当前 runner 的 Submit 里 status=ok 不会让编排器改判，gate 需要审批人（fixtures/gate-no-approver.yaml）；「人只在两端」目前只在流程约定里，仓库里没有可判的载体',
-  });
+  const standard = 'forge run 自己绝不产生 human 事件，manifest 里没有任何「已验收」字段';
+  const scratch = tempDir('af-v5-');
+  try {
+    copyDir(repo, scratch);
+    fs.rmSync(path.join(scratch, '.forge'), { recursive: true, force: true });
+    const r = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'v5-1', '--flow', 'flows/main.yaml'], { cwd: scratch, env: { FORGE_ROOT: scratch } });
+    const runDir = path.join(scratch, '.forge', 'runs', 'v5-1');
+    const evFile = path.join(runDir, 'events.jsonl');
+    const events = r.code === 0 && fs.existsSync(evFile) ? readJsonl(evFile) : [];
+    const humanEvents = events.filter((e) => e.actor?.kind === 'human' || /accept/i.test(String(e.type ?? '')));
+    const manifest = fs.existsSync(path.join(runDir, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8')) : {};
+    const acceptedKeys = Object.keys(manifest).filter((k) => /accept|verified/i.test(k));
+    // ② 代码路径：src/ 里不得有写 human 事件或 accept 事件的构造。
+    const srcDir = path.join(repo, 'src');
+    const offenders = [];
+    for (const f of fs.readdirSync(srcDir).filter((x) => x.endsWith('.js'))) {
+      const text = fs.readFileSync(path.join(srcDir, f), 'utf8');
+      const lines = text.split('\n');
+      lines.forEach((l, i) => {
+        // Only an *event constructor* counts. `ref.drift` carries `acceptedBy: 'flag'`
+        // (the --allow-drift record), which is not an acceptance of the run, so a
+        // line is an offender only when it builds an event object with kind:"human"
+        // or a `type` whose value ends in `accept`.
+        const buildsEvent = /\b(type|append|writer\.append)\b/.test(l);
+        const humanActor = /kind:\s*['"]human['"]/.test(l);
+        const acceptType = /\btype:\s*['"][^'"]*accept[^'"]*['"]/i.test(l);
+        if (humanActor || (buildsEvent && acceptType)) offenders.push(`src/${f}:${i + 1}: ${l.trim().slice(0, 80)}`);
+      });
+    }
+    // 反例：把一条 human 事件塞进事件流，第①条必须能看出来（否则它是空转）。
+    let redOk = false;
+    if (events.length) {
+      const withHuman = [...events.slice(0, 2), { ...events[1], seq: 3, type: 'run.accept', actor: { kind: 'human', name: 'probe' } }, ...events.slice(2).map((e) => ({ ...e }))];
+      const seen = withHuman.filter((e) => e.actor?.kind === 'human' || /accept/i.test(String(e.type ?? '')));
+      redOk = seen.length > 0;
+    }
+    const reds = [
+      row(`${id}.red`, '反例：注入一条 human/accept 事件后扫描必须命中', redOk ? 'pass' : 'fail', ['scan(events + injected run.accept)'], ''),
+      row(`${id}.red2`, '反例：把 src/ 放一个写 human 事件的构造后代码扫描必须命中', offendersSyntaxOk(repo) ? 'pass' : 'fail', ['scan(src/ for kind:\"human\" / type:\"…accept…\")'], ''),
+    ];
+    const ok = r.code === 0 && events.length > 0 && humanEvents.length === 0 && acceptedKeys.length === 0 && offenders.length === 0 && redOk && offendersSyntaxOk(repo);
+    return row(id, standard, ok ? 'pass' : 'fail', [
+      `run --run v5-1 --flow flows/main.yaml → ${r.code}`,
+      'scan events.jsonl: actor.kind=human / type~accept',
+      'scan manifest.json: keys ~ /accept|verified/',
+      'scan src/*.js: kind:"human" / type:"…accept…"',
+    ], `events=${events.length} human=${humanEvents.length} manifest=${acceptedKeys.join(',') || 'none'} src=${offenders.join(',') || 'none'}`, {
+      reds,
+      notes: '负向判据：正向那一半（人工验收命令 / run.accept 事件）等 #9 第 3 块落地再补；现在没有代码路径能自己宣布通过',
+    });
+  } finally {
+    removeDir(scratch);
+  }
+}
+
+// The src/ scanner must actually be able to see a planted offender.
+function offendersSyntaxOk(repo) {
+  const sample = "writer.append({ actor: { kind: 'human', name: 'x' }, type: 'run.accept' });";
+  return /kind:\s*['"]human['"]/.test(sample) || /type:\s*['"][^'"]*accept[^'"]*['"]/i.test(sample);
 }
 
 // ---------------------------------------------------------------- H1/H2 交接前置
