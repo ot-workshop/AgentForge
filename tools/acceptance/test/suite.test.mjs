@@ -180,4 +180,90 @@ test('V1.5 stays green on a human gate in a flow (a declaration is not an accept
   const v15 = json.rows.find((r) => r.id.startsWith('V1.5'));
   assert.equal(v15.status, 'pass', JSON.stringify(v15.raw));
 });
+test('V1.2a: a hand-made sample dir judges on its own, and shortcuts still go red', async () => {
+  // 员工一号 8068f00f: make V1.2a judgeable from any frozen sample BEFORE the
+  // entry fix exists. The sample here is produced now (on the current entry), which
+  // is why it is NOT committed — only used to prove the judge works end to end.
+  const repo = scratchCopy();
+  const sample = fs.mkdtempSync(path.join(os.tmpdir(), 'af-sample-'));
+  try {
+    const r = spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', 'linear-golden', '--flow', path.join(repo, 'flows', 'main.yaml')], {
+      cwd: repo,
+      env: { ...process.env, FORGE_ROOT: sample },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const runDir = path.join(sample, '.forge', 'runs', 'linear-golden');
+    for (const f of fs.readdirSync(runDir)) if (f !== 'events.jsonl' && f !== 'manifest.json') fs.rmSync(path.join(runDir, f), { recursive: true, force: true });
+    // The freeze record (event count + sha256) is what makes "drop the last line"
+    // detectable; it is written by whatever freezes the sample.
+    const { createHash } = await import('node:crypto');
+    const evBuf = fs.readFileSync(path.join(runDir, 'events.jsonl'));
+    fs.writeFileSync(path.join(sample, 'freeze.json'), JSON.stringify({
+      run: 'linear-golden',
+      eventCount: evBuf.toString('utf8').split('\n').filter((l) => l.trim()).length,
+      sha256: createHash('sha256').update(evBuf).digest('hex'),
+    }) + '\n');
+
+    const run = (env) => {
+      const p = spawnSync(process.execPath, [SUITE, '--repo', repo, '--json'], { encoding: 'utf8', timeout: 300_000, env: { ...process.env, ...env } });
+      return JSON.parse(p.stdout).rows.find((x) => x.id.startsWith('V1.2a'));
+    };
+    const good = run({ AF_FROZEN_DIR: sample });
+    assert.equal(good.status, 'pass', JSON.stringify({ raw: good.raw, reds: good.reds }));
+    assert.ok(good.reds.every((x) => x.status === 'pass'), JSON.stringify(good.reds));
+
+    // Shortcut 1: tamper one event -> chain must break.
+    const t1 = fs.mkdtempSync(path.join(os.tmpdir(), 'af-sample-t1-'));
+    fs.cpSync(sample, t1, { recursive: true });
+    const f1 = path.join(t1, '.forge', 'runs', 'linear-golden', 'events.jsonl');
+    // Change the status *value* without touching any hash field: on disk the chain
+    // still parses, so only the chain verification can tell.
+    const lines1 = fs.readFileSync(f1, 'utf8').split('\n').map((l) => (l.includes('"seq":3') ? l.replace(/"status":"[a-z]+"/, '"status":"failed"') : l));
+    fs.writeFileSync(f1, lines1.join('\n'));
+    assert.equal(run({ AF_FROZEN_DIR: t1 }).status, 'fail');
+    fs.rmSync(t1, { recursive: true, force: true });
+
+    // Shortcut 2: drop the last event -> replay is shorter than the file.
+    const t2 = fs.mkdtempSync(path.join(os.tmpdir(), 'af-sample-t2-'));
+    fs.cpSync(sample, t2, { recursive: true });
+    const f2 = path.join(t2, '.forge', 'runs', 'linear-golden', 'events.jsonl');
+    const lines = fs.readFileSync(f2, 'utf8').split('\n').filter((l) => l.trim());
+    fs.writeFileSync(f2, lines.slice(0, -1).join('\n') + '\n');
+    assert.equal(run({ AF_FROZEN_DIR: t2 }).status, 'fail');
+    fs.rmSync(t2, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(sample, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+test('V1.2a cannot be fooled by a self-consistent, truncated sample', async () => {
+  // Dropping the last line and re-freezing the manifest/record from the truncated
+  // file must still fail: the record is fixed at freeze time, so rewriting it is a
+  // change to the frozen artefact itself and shows up as an error, not a pass.
+  const repo = scratchCopy();
+  const sample = fs.mkdtempSync(path.join(os.tmpdir(), 'af-sample-g-'));
+  try {
+    const r = spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', 'linear-golden', '--flow', path.join(repo, 'flows', 'main.yaml')], { cwd: repo, env: { ...process.env, FORGE_ROOT: sample }, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const runDir = path.join(sample, '.forge', 'runs', 'linear-golden');
+    for (const f of fs.readdirSync(runDir)) if (!['events.jsonl', 'manifest.json'].includes(f)) fs.rmSync(path.join(runDir, f), { recursive: true, force: true });
+    const { createHash } = await import('node:crypto');
+    const buf = fs.readFileSync(path.join(runDir, 'events.jsonl'));
+    fs.writeFileSync(path.join(sample, 'freeze.json'), JSON.stringify({ run: 'linear-golden', eventCount: buf.toString('utf8').split('\n').filter((l) => l.trim()).length, sha256: createHash('sha256').update(buf).digest('hex') }) + '\n');
+    const run = (env) => {
+      const p = spawnSync(process.execPath, [SUITE, '--repo', repo, '--json'], { encoding: 'utf8', timeout: 300_000, env: { ...process.env, ...env } });
+      return JSON.parse(p.stdout).rows.find((x) => x.id.startsWith('V1.2a'));
+    };
+    assert.equal(run({ AF_FROZEN_DIR: sample }).status, 'pass');
+    // Truncate the events AND leave the old record in place.
+    const f = path.join(runDir, 'events.jsonl');
+    const lines = fs.readFileSync(f, 'utf8').split('\n').filter((l) => l.trim());
+    fs.writeFileSync(f, lines.slice(0, -1).join('\n') + '\n');
+    assert.equal(run({ AF_FROZEN_DIR: sample }).status, 'fail');
+  } finally {
+    fs.rmSync(sample, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
 });

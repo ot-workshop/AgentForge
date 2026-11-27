@@ -22,7 +22,7 @@ fails, `2` usage error. It never writes into `<checkout>`: every probe that need
 | `H1 run-positional-arg` | `forge run <file>` 不得静默忽略 | non-zero + `E_INVALID_ARGS`, no run dir created |
 | `H2 flow-path-relative` | `--flow` 写出的路径可跨机重放 | `manifest.flow.path == run.start.payload.flow`, relative to the repo root |
 | `V1.1 人机同门` | 人画的和 agent 写的过同一个校验器，报错指回节点 | CLI verdict == library verdict; a cycle is refused with a node id |
-| `V1.2a replay==incremental==从头` | 全程事件可回放 | frozen run: replay == incremental(0) == events.jsonl, `--since 2` == the tail. 冻结样例只入 `events.jsonl` + `manifest.json`（员工一号 820539da：`context/`、`checks.lock`、`.events-lock` 一律不入） |
+| `V1.2a replay==incremental==从头` | 全程事件可回放 | frozen run: replay == incremental(0) == events.jsonl（经 `src/project.js` 投影后逐行相等）, `--since 2` == the tail, row count == `freeze.json`（该样例冻结时的 sha256/条数）。判定入口可换：`AF_FROZEN_DIR=<dir>` 指任何含 `.forge/runs/<run>/events.jsonl` 的目录。 冻结样例只入 `events.jsonl` + `manifest.json`（员工一号 820539da：`context/`、`checks.lock`、`.events-lock` 一律不入） |
 | `V1.2b 失败定位到阶段` | 中途失败能定位阶段与原因 | `stage.end.status=failed` on the failing stage, visible in `/snapshot` |
 | `V1.3 越权被拦` | 权限边界由编排器强制 | a runner that rewrites the checker is refused (`E_PERMISSION_GAP`) |
 | `V1.4 分支与有限循环` | 循环/分支，上限是硬限制 | 未验 until #10 lands |

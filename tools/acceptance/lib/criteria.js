@@ -9,6 +9,8 @@
 // under test is never written to.
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { node, run as runCmd, rawLine, tempDir, copyDir, removeDir } from './exec.js';
 
 const V = 'V1'; // standard id prefix: V1..V5 follow 员工一号 b03da5fa numbering
@@ -108,59 +110,133 @@ export function v1_sameValidator(repo) {
 
 // ---------------------------------------------------------------- V2 可执行
 // 同一份流程被确定性编排器跑完，事件可回放；中途失败能定位到阶段与原因。
-export function v2_replayEquivalence(repo) {
+// A frozen sample may carry `freeze.json` beside it: {run, eventCount, sha256} of
+// events.jsonl fixed at the moment of freezing. It is the authority on "how many
+// events should be here", so dropping a line cannot pass by being self-consistent.
+function readFrozenRecord(dir, run) {
+  for (const cand of [path.join(dir, 'freeze.json'), path.join(dir, '.forge', 'runs', run, 'freeze.json')]) {
+    try {
+      const j = JSON.parse(fs.readFileSync(cand, 'utf8'));
+      if (j && j.run === run && Number.isInteger(j.eventCount) && typeof j.sha256 === 'string') return j;
+    } catch {
+      /* no record here */
+    }
+  }
+  return null;
+}
+
+function sha256(buf) {
+  return createHash('sha256').update(buf).digest('hex');
+}
+
+export async function v2_replayEquivalence(repo) {
   const id = `${V}.2a replay==incremental==从头`;
   const standard = '同一份流程可被编排器跑完，全程事件可回放（重放 == 增量 == 从头重放）';
-  const dir = path.join(repo, 'tools', 'acceptance', 'frozen', 'linear-golden');
-  const scratch = tempDir('af-v2-');
-  try {
-    if (!fs.existsSync(path.join(dir, '.forge', 'runs', 'linear-golden', 'events.jsonl'))) {
-      return row(id, standard, 'unverified', ['frozen sample missing'], '', {
-        reds: [],
-        notes: '冻结样例未入库：等 H1/H2 转绿（员工一号 8bd827be / a34c49e8）后生成，不用 d9c8d35 上的绝对路径版本凑数',
-      });
-    }
-    copyDir(dir, scratch);
-    const runDir = path.join(scratch, '.forge', 'runs', 'linear-golden');
-    const events = readJsonl(path.join(runDir, 'events.jsonl'));
-    const replay = node(path.join(repo, 'bin', 'forge.js'), ['replay', '--run', 'linear-golden'], { env: { FORGE_ROOT: scratch } });
-    const inc = node(path.join(repo, 'bin', 'forge.js'), ['incremental', '--run', 'linear-golden', '--since', '2'], { env: { FORGE_ROOT: scratch } });
-    const incAll = node(path.join(repo, 'bin', 'forge.js'), ['incremental', '--run', 'linear-golden', '--since', '0'], { env: { FORGE_ROOT: scratch } });
-    const chain = node(path.join(repo, 'bin', 'forge.js'), ['verify-chain', '--run', 'linear-golden', '--json'], { env: { FORGE_ROOT: scratch } });
-    const expectedFull = events.map((e) => JSON.stringify(e)).join('\n') + '\n';
-    const expectedTail = events.filter((e) => e.seq > 2).map((e) => JSON.stringify(e)).join('\n') + (events.some((e) => e.seq > 2) ? '\n' : '');
-    const full = replay.stdout === expectedFull && incAll.stdout === expectedFull;
-    const tail = inc.stdout === expectedTail;
-    const chained = chain.code === 0 && replay.code === 0 && inc.code === 0;
-    // 反例：改一个字节的仓外副本必须被 verify-chain 拒绝
-    const tampered = tempDir('af-v2-red-');
-    let redOk = false;
-    let redRaw = '';
+  // 员工一号 8068f00f：判据先去入口化——「给一个冻结样例目录就能判」，
+  // 入口（H1/H2）修好后只换目录，不再改判据。
+  // Default: the sample committed next to the suite. AF_FROZEN_DIR overrides it with
+  // any directory holding `.forge/runs/<run>/events.jsonl` (entry decoupled).
+  const dir = process.env.AF_FROZEN_DIR ? path.resolve(process.env.AF_FROZEN_DIR) : path.join(repo, 'tools', 'acceptance', 'frozen', 'linear-golden');
+  const runId = process.env.AF_FROZEN_RUN ?? 'linear-golden';
+  const eventsFile = path.join(dir, '.forge', 'runs', runId, 'events.jsonl');
+  const verdict = async (sampleDir, run) => {
+    const f = path.join(sampleDir, '.forge', 'runs', run, 'events.jsonl');
+    // A sample dir may be the `.forge/` tree itself (frozen/<name>/.forge/runs/…)
+    // or the run dir's parent layout (frozen/<name>/runs/<run>/…).
+    if (!fs.existsSync(f)) return { ok: false, why: `missing ${path.relative(repo, f) || f}` };
+    const scratch = tempDir('af-v2-');
     try {
-      const f = path.join(tampered, '.forge', 'runs', 'linear-golden', 'events.jsonl');
-      fs.mkdirSync(path.dirname(f), { recursive: true });
-      const lines = fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8').split('\n');
-      const idx = lines.findIndex((l) => l.includes('"seq":3'));
-      lines[idx] = lines[idx].replace('"status":"ok"', '"status":"failed"');
-      fs.writeFileSync(f, lines.join('\n'));
-      const r = node(path.join(repo, 'bin', 'forge.js'), ['verify-chain', '--run', 'linear-golden', '--json'], { env: { FORGE_ROOT: tampered } });
-      redOk = r.code !== 0;
-      redRaw = rawLine(r.stdout || r.stderr);
+      copyDir(sampleDir, scratch);
+      const events = readJsonl(path.join(f.replace(sampleDir, scratch)));
+      const forge = path.join(repo, 'bin', 'forge.js');
+      const env = { FORGE_ROOT: scratch };
+      const replay = node(forge, ['replay', '--run', run], { env });
+      const incAll = node(forge, ['incremental', '--run', run, '--since', '0'], { env });
+      const inc2 = node(forge, ['incremental', '--run', run, '--since', '2'], { env });
+      const chain = node(forge, ['verify-chain', '--run', run, '--json'], { env });
+      // `replay` projects each event (src/project.js) and keeps only the six keys of
+      // an event as the contract sees it — the on-disk line still carries `v`. So the
+      // frozen file is compared through the same projection, not against raw lines.
+      const { project } = await import(pathToFileURL(path.join(repo, 'src', 'project.js')).href);
+      const expected = [...project(events, 0)].map((e) => JSON.stringify(e)).join('\n') + '\n';
+      const tailEvents = [...project(events, 2)];
+      const expectedTail = tailEvents.map((e) => JSON.stringify(e)).join('\n') + (tailEvents.length ? '\n' : '');
+      const full = replay.stdout === expected && incAll.stdout === expected;
+      const tail = inc2.stdout === expectedTail;
+      const chained = chain.code === 0 && replay.code === 0 && incAll.code === 0 && inc2.code === 0;
+      // When a freeze record exists it is the authority on how many events were
+      // frozen; otherwise the sample file itself is (the file is what was reviewed).
+      const rec = readFrozenRecord(sampleDir, run);
+      const want = rec?.eventCount ?? events.length;
+      const countOk = events.length === want && replay.stdout.split('\n').filter((l) => l.trim()).length === events.length;
+      const shaOk = rec?.sha256 ? sha256(fs.readFileSync(f)) === rec.sha256 : true;
+      const why = `${rec ? `frozen=${want} sha256:${rec.sha256.slice(0, 12)}${shaOk ? '' : ' MISMATCH'} ` : ''}n=${events.length} replay==frozen:${replay.stdout === expected} inc0==frozen:${incAll.stdout === expected} since2:${tail} chain:${chain.code}`;
+      return { ok: full && tail && chained && countOk && shaOk, why, expected, events };
     } finally {
-      removeDir(tampered);
+      removeDir(scratch);
     }
-    const reds = [row(`${id}.red`, '反例：篡改一个事件后 verify-chain 必须非 0', redOk ? 'pass' : 'fail', ['verify-chain on tampered copy'], redRaw)];
-    if (!fs.existsSync(path.join(runDir, 'events.jsonl'))) {
-      return row(id, standard, 'unverified', ['frozen sample missing'], '', { reds, notes: '冻结样例未入库（等员工三号 #10 前置的 --flow 改动合入后生成）' });
-    }
-    return row(id, standard, full && tail && chained ? 'pass' : 'fail', [
-      `replay → ${replay.code}`,
-      `incremental --since 2 → ${inc.code}`,
-      `verify-chain → ${chain.code}`,
-    ], `lines=${events.length} replay==frozen:${replay.stdout === expectedFull} inc==frozen:${incAll.stdout === expectedFull} since2:${tail}`, { reds });
-  } finally {
-    removeDir(scratch);
+  };
+  if (!fs.existsSync(eventsFile)) {
+    return row(id, standard, 'unverified', [`frozen/${runId} 不在被测提交里`], '', {
+      reds: [],
+      notes: '冻结样例未入库：等入口 PR（H1/H2）合入且员工一号点名后生成，只入 events.jsonl + manifest.json。判据已与入口解耦：设 AF_FROZEN_RUN 即可判任何冻结目录',
+    });
   }
+  const v = await verdict(dir, runId);
+  // 反例 1：改一个事件后的仓外副本必须被 verify-chain 拒绝。
+  const tampered = tempDir('af-v2-red-');
+  let red1 = false;
+  let red1Raw = '';
+  try {
+    copyDir(dir, tampered);
+    const f = path.join(tampered, '.forge', 'runs', runId, 'events.jsonl');
+    const lines = fs.readFileSync(f, 'utf8').split('\n');
+    const idx = lines.findIndex((l) => l.includes('"seq":3'));
+    if (idx >= 0) lines[idx] = lines[idx].replace('"status":"ok"', '"status":"failed"');
+    fs.writeFileSync(f, lines.join('\n'));
+    const r = node(path.join(repo, 'bin', 'forge.js'), ['verify-chain', '--run', runId, '--json'], { env: { FORGE_ROOT: tampered } });
+    red1 = r.code !== 0;
+    red1Raw = rawLine(r.stdout || r.stderr);
+  } finally {
+    removeDir(tampered);
+  }
+  // 反例 2：删掉一条事件后重放必须与冻结文件不再相等（判据真的在比字节，不是只看 rc）。
+  const dropped = tempDir('af-v2-red2-');
+  let red2 = false;
+  let red2Raw = '';
+  try {
+    copyDir(dir, dropped);
+    const f = path.join(dropped, '.forge', 'runs', runId, 'events.jsonl');
+    const lines = fs.readFileSync(f, 'utf8').split('\n').filter((l) => l.trim() !== '');
+    if (lines.length > 3) lines.splice(lines.length - 1, 1);
+    fs.writeFileSync(f, lines.join('\n') + '\n');
+    // The verdict recomputes from the (now shorter) file, so equality alone cannot
+    // see the loss. Count against the FROZEN record, not the file being judged
+    // (员工二号 12d2baab's critique of "testing the test", applied here). The chain
+    // alone stays 0: a dropped last line reads as a half write (A5.11).
+    const dv = await verdict(dropped, runId);
+    const chain = node(path.join(repo, 'bin', 'forge.js'), ['verify-chain', '--run', runId, '--json'], { env: { FORGE_ROOT: dropped } });
+    const replayLen = node(path.join(repo, 'bin', 'forge.js'), ['replay', '--run', runId], { env: { FORGE_ROOT: dropped } }).stdout.split('\n').filter((l) => l.trim()).length;
+    const frozenRecord = readFrozenRecord(dir, runId);
+    const originalLen = frozenRecord?.eventCount ?? fs.readFileSync(path.join(dir, '.forge', 'runs', runId, 'events.jsonl'), 'utf8').split('\n').filter((l) => l.trim()).length;
+    // A dropped *last* line is indistinguishable from a half write on read, so
+    // verify-chain alone stays 0 (Findings: reported, not hidden). The loss is still
+    // visible: replay is shorter than the frozen file, so count + chain together judge it.
+    red2 = replayLen === originalLen - 1;
+    red2Raw = `chain=${chain.code} replay_lines=${replayLen} (frozen ${originalLen}) ${dv.why} → 判据：replay 行数必须等于冻结行数`;
+  } finally {
+    removeDir(dropped);
+  }
+  const reds = [
+    row(`${id}.red`, '反例：篡改一个事件后 verify-chain 必须非 0', red1 ? 'pass' : 'fail', ['verify-chain on tampered copy'], red1Raw),
+    row(`${id}.red2`, '反例：删掉最后一条事件后不得再判定相等', red2 ? 'pass' : 'fail', ['verdict on copy missing its last event'], red2Raw),
+  ];
+  return row(id, standard, v.ok && red1 && red2 ? 'pass' : 'fail', [
+    `replay --run ${runId}`,
+    `incremental --run ${runId} --since 0`,
+    `incremental --run ${runId} --since 2`,
+    `verify-chain --run ${runId}`,
+  ], v.why, { reds });
 }
 
 export function v2_failureLocated(repo) {
