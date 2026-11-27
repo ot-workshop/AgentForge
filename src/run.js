@@ -17,7 +17,35 @@ const DEFAULT_STAGES = ['design', 'build', 'verify'];
 // however the run dir was initialised before the stage.
 const CHECKER_CONTENT = '{"checks":[],"sealed":true}\n';
 
-export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) {
+// `run.start.payload.flow` and `manifest.flow.path` both hold this one value:
+// the flow path relative to `rootDir` with `/` separators, so the same flow on
+// another machine (or in a frozen sample) writes the same bytes. A flow outside
+// `rootDir` has no such value: it is refused before the run dir is created.
+export function recordFlowPath(flowPath, rootDir) {
+  const abs = path.resolve(flowPath);
+  const rel = path.relative(path.resolve(rootDir), abs);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return rel.split(path.sep).join('/');
+}
+
+export async function runLinear({ rootDir, flowPath: flowInput, fake, runId, allowDrift }) {
+  const flowPath = flowInput == null ? null : path.resolve(flowInput);
+  const flowRecord = flowPath == null ? null : recordFlowPath(flowPath, rootDir);
+  if (flowPath && flowRecord === null) {
+    throw {
+      errors: [
+        structuredError({
+          code: 'E_INVALID_ARGS',
+          severity: 'block',
+          locatable: false,
+          path: `--flow ${flowInput}`,
+          ids: [],
+          fix: { action: 'pass a flow inside the project root', rootDir: path.resolve(rootDir), got: flowInput },
+        }),
+      ],
+      exitCode: 1,
+    };
+  }
   const { stages, blocks } = loadFlow(flowPath);
   const runsDir = path.join(rootDir, '.forge', 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
@@ -113,7 +141,7 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
     if (!tailOk) writer.append({ ...notesRun, type: 'log', payload: { severity: 'warn', message: 'trailing partial line truncated before append' } });
     // A fresh run id with an empty run dir must start at seq 1 (A5.4).
     if (isNewRun && writer.nextSeq !== 1) writer.resetChain();
-    const runStart = writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.start', payload: { flow: flowPath ?? null, fake: fake ?? null } });
+    const runStart = writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.start', payload: { flow: flowRecord, fake: fake ?? null } });
     if (driftAccepted) {
       writer.append({ run_id: id, stage: null, iteration: 1, actor: { kind: 'orchestrator', name: 'forge' }, type: 'ref.drift', payload: { drift: driftAccepted, acceptedBy: 'flag' } });
     }
@@ -144,7 +172,7 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
       if (res.crash) {
         // Runner process died: exit 2, one stderr line, no error event (A5.8).
         writeWarnIfHalf(writer, runDir, id, stage);
-        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'crashed', runStartedAt: runStart.ts, drift: driftAccepted });
+        writeManifest(runDir, { runId: id, flowPath, flowRecord, blocks, status: 'crashed', runStartedAt: runStart.ts, drift: driftAccepted });
         writer.append({ run_id: id, stage, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'crashed' } });
         const err = new Error(res.stderr.trim().split('\n')[0] || 'runner crashed');
         err.exitCode = 2;
@@ -169,7 +197,7 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
           code: 'E_ILLEGAL_STAGE_WRITE',
           severity: 'block',
           locatable: false,
-          path: `flows/${flowPath}#${stage}`,
+          path: `flows/${flowRecord}#${stage}`,
           ids: [`stage:${stage}`],
           fix: { action: 'events must be written through the orchestrator, not by the runner' },
         });
@@ -210,14 +238,14 @@ export async function runLinear({ rootDir, flowPath, fake, runId, allowDrift }) 
         writeWarnIfHalf(writer, runDir, id, stage);
         writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'failed' } });
         writer.sync();
-        writeManifest(runDir, { runId: id, flowPath, blocks, status: 'failed', runStartedAt: runStart.ts, drift: driftAccepted });
+        writeManifest(runDir, { runId: id, flowPath, flowRecord, blocks, status: 'failed', runStartedAt: runStart.ts, drift: driftAccepted });
         return { exitCode: 1, runId: id, error };
       }
     }
     writeWarnIfHalf(writer, runDir, id, null);
     writer.append({ run_id: id, stage: null, actor: { kind: 'orchestrator', name: 'forge' }, type: 'run.end', payload: { status: 'ok' } });
     writer.sync();
-    writeManifest(runDir, { runId: id, flowPath, blocks, status: 'ok', runStartedAt: runStart.ts, drift: driftAccepted });
+    writeManifest(runDir, { runId: id, flowPath, flowRecord, blocks, status: 'ok', runStartedAt: runStart.ts, drift: driftAccepted });
     return { exitCode: 0, runId: id };
   } finally {
     writer.close();
@@ -252,7 +280,7 @@ function loadFlow(flowPath) {
   return { stages: nodes.map((n) => n.id), blocks };
 }
 
-function writeManifest(runDir, { runId, flowPath, blocks, status, runStartedAt, drift }) {
+function writeManifest(runDir, { runId, flowPath, flowRecord, blocks, status, runStartedAt, drift }) {
   const file = path.join(runDir, 'manifest.json');
   const prev = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
   const refs = { ...(prev.blocks ?? {}), ...blocks };
@@ -260,7 +288,7 @@ function writeManifest(runDir, { runId, flowPath, blocks, status, runStartedAt, 
     run_id: runId,
     // Must equal the `run.start` event ts of this run (A2.4f); a resumed run keeps its first one.
     run_started_at: prev.run_started_at ?? runStartedAt ?? new Date().toISOString(),
-    flow: flowPath ? { path: flowPath, sha256: fs.existsSync(flowPath) ? sha256Hex(fs.readFileSync(flowPath)) : null } : null,
+    flow: flowPath ? { path: flowRecord, sha256: fs.existsSync(flowPath) ? sha256Hex(fs.readFileSync(flowPath)) : null } : null,
     // order is fixed: content sha256 -> validator version -> validation result
     blocks: Object.fromEntries(Object.entries(refs).map(([id, b]) => [id, { ref: b.ref, sha256: b.sha256, validator: VALIDATOR_VERSION, result: b.result ?? 'ok' }])),
     status,

@@ -18,7 +18,7 @@ const USAGE = `forge <command> [options]
   verify --check-refs --run <run_id>         引用漂移检测（A7.2）
   append --run <run_id> --event-file <jsonl>  经锁与哈希链追加事件（A5.3）
   serve [--port <n>]                          Live（/healthz /snapshot /events）
-  validate <flow.yaml> [--json]
+  validate <flow.yaml> [--json]          块按 FORGE_ROOT，否则流程文件所在仓库
   run --run <run_id> --flow <path>
 `;
 
@@ -57,6 +57,17 @@ function usageError(msg) {
   return err;
 }
 
+function flowProjectDir(absFlow) {
+  if (process.env.FORGE_ROOT) return path.resolve(process.env.FORGE_ROOT);
+  let dir = path.dirname(absFlow);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, 'blocks'))) return dir;
+    const up = path.dirname(dir);
+    if (up === dir) return root();
+    dir = up;
+  }
+}
+
 function emitErrors(errors, json) {
   if (json) process.stdout.write(JSON.stringify({ errors }) + '\n');
   else for (const e of errors) process.stderr.write(`${e.code}: ${e.path || ''}\n`);
@@ -89,9 +100,50 @@ export async function main(argv = process.argv.slice(2)) {
         return 0;
       }
       case 'run': {
+        // `forge run` takes its flow as `--flow <path>` (v2.4 appendix A). A
+        // positional argument used to be dropped silently and the default
+        // three stages ran instead; refuse it as a block error, not a crash.
+        if (opts._.length) {
+          throw {
+            errors: [
+              structuredError({
+                code: 'E_INVALID_ARGS',
+                severity: 'block',
+                locatable: false,
+                path: `run ${opts._.join(' ')}`,
+                ids: [],
+                fix: { action: 'pass the flow with --flow <path>', got: opts._ },
+              }),
+            ],
+            exitCode: 1,
+          };
+        }
+        // A `--flow` that names no file is refused too: it used to fall back to
+        // the default three stages with `flow: null` and still create a run.
+        // (No `--flow` remains the explicit default-stages form.)
+        let flowPath = null;
+        if (opts.flow === true) throw usageError('--flow needs a path');
+        if (opts.flow) {
+          flowPath = path.resolve(opts.flow);
+          if (!fs.existsSync(flowPath)) {
+            throw {
+              errors: [
+                structuredError({
+                  code: 'E_FILE_NOT_FOUND',
+                  severity: 'block',
+                  locatable: false,
+                  path: `--flow ${opts.flow}`,
+                  ids: [],
+                  fix: { action: 'pass an existing flow file inside the project root', path: flowPath },
+                }),
+              ],
+              exitCode: 1,
+            };
+          }
+        }
         const res = await runLinear({
           rootDir: root(),
-          flowPath: opts.flow && opts.flow !== true ? path.resolve(opts.flow) : null,
+          flowPath,
           fake: process.env.FORGE_FAKE ?? null,
           runId: opts.run && opts.run !== true ? String(opts.run) : undefined,
           allowDrift: !!opts['allow-drift'],
@@ -115,7 +167,18 @@ export async function main(argv = process.argv.slice(2)) {
         const doc = loadYamlFile(abs);
         const p0Errors = validateP0(doc, { file });
         const sev = opts.severity && opts.severity !== true ? String(opts.severity) : null;
-        let errors = p0Errors.length ? p0Errors : validateFlow(doc, { file, p0: false });
+        // Same project root as `run`: block/agent/check lookups follow
+        // `FORGE_ROOT` (or the cwd) rather than the flow file's location,
+        // so a flow in another directory is judged against the same
+        // blocks/ that `forge run --flow <path>` would use.
+        // `validate <file>` judges the file against the repository that file
+        // lives in (nearest ancestor with blocks/); `FORGE_ROOT` wins when set,
+        // and cwd is the last resort. This keeps `validate` and `run` on the
+        // same blocks/ wherever the caller's cwd is.
+        let errors = p0Errors.length ? p0Errors : validateFlow(doc, { file, p0: false, projectDir: flowProjectDir(abs) });
+        // The CLI names the file as the caller did, not as an absolute path
+        // (the canvas route compares its JSON against this output).
+        errors = errors.map((e) => (e.path && String(e.path).startsWith(abs + '#') ? { ...e, path: file + String(e.path).slice(abs.length) } : e));
         if (sev) errors = errors.filter((e) => e.severity === sev);
         const block = errors.filter((e) => e.severity === 'block');
         if (json || errors.length) emitErrors(errors, json);
