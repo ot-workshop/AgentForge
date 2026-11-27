@@ -114,7 +114,9 @@ export function v1_sameValidator(repo) {
 // events.jsonl fixed at the moment of freezing. It is the authority on "how many
 // events should be here", so dropping a line cannot pass by being self-consistent.
 function readFrozenRecord(dir, run) {
-  for (const cand of [path.join(dir, 'freeze.json'), path.join(dir, '.forge', 'runs', run, 'freeze.json')]) {
+  const names = [process.env.AF_FREEZE_FILE ?? 'freeze.json', 'freeze.json'];
+  const cands = [...names.map((n) => path.join(dir, n)), ...names.map((n) => path.join(dir, '.forge', 'runs', run, n))];
+  for (const cand of cands) {
     try {
       const j = JSON.parse(fs.readFileSync(cand, 'utf8'));
       if (j && j.run === run && Number.isInteger(j.eventCount) && typeof j.sha256 === 'string') return j;
@@ -123,6 +125,21 @@ function readFrozenRecord(dir, run) {
     }
   }
   return null;
+}
+
+// 员工四号 158d01cc: the entry PR changes exactly `manifest.flow.path` and
+// `run.start.payload.flow` (absolute -> relative). Recording their expected values
+// in freeze.json means a sample taken on the old entry cannot silently pass on the
+// new one: the shape is part of what was frozen, and a mismatch is reported.
+function flowShape(sampleDir, run) {
+  const runDir = path.join(sampleDir, '.forge', 'runs', run);
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8'));
+    const first = JSON.parse(fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8').split('\n')[0]);
+    return { manifestFlow: manifest.flow?.path ?? null, startFlow: first.payload?.flow ?? null };
+  } catch {
+    return null;
+  }
 }
 
 function sha256(buf) {
@@ -170,8 +187,18 @@ export async function v2_replayEquivalence(repo) {
       const want = rec?.eventCount ?? events.length;
       const countOk = events.length === want && replay.stdout.split('\n').filter((l) => l.trim()).length === events.length;
       const shaOk = rec?.sha256 ? sha256(fs.readFileSync(f)) === rec.sha256 : true;
-      const why = `${rec ? `frozen=${want} sha256:${rec.sha256.slice(0, 12)}${shaOk ? '' : ' MISMATCH'} ` : ''}n=${events.length} replay==frozen:${replay.stdout === expected} inc0==frozen:${incAll.stdout === expected} since2:${tail} chain:${chain.code}`;
-      return { ok: full && tail && chained && countOk && shaOk, why, expected, events };
+      // Flow shape, when recorded: both places must equal what was frozen.
+      const shape = flowShape(sampleDir, run);
+      const shapeChecks = rec?.flowPath
+        ? [
+            { what: 'manifest.flow.path', want: rec.flowPath, got: shape?.manifestFlow },
+            { what: 'run.start.payload.flow', want: rec.flowPath, got: shape?.startFlow },
+          ]
+        : [];
+      const shapeMismatch = shapeChecks.filter((c) => c.got !== c.want);
+      const shapeOk = rec?.flowPath === undefined ? true : shapeMismatch.length === 0;
+      const why = `${rec ? `frozen=${want} sha256:${rec.sha256.slice(0, 12)}${shaOk ? '' : ' MISMATCH'}${rec.flowPath ? ` flow=${JSON.stringify(rec.flowPath)}${shapeOk ? '' : ` MISMATCH(${shapeMismatch.map((c) => `${c.what}=${JSON.stringify(c.got)}`).join(',')})`}` : ''} ` : ''}n=${events.length} replay==frozen:${replay.stdout === expected} inc0==frozen:${incAll.stdout === expected} since2:${tail} chain:${chain.code}`;
+      return { ok: full && tail && chained && countOk && shaOk && shapeOk, why, expected, events };
     } finally {
       removeDir(scratch);
     }

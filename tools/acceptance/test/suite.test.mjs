@@ -266,4 +266,34 @@ test('V1.2a cannot be fooled by a self-consistent, truncated sample', async () =
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+test('V1.2a records the flow shape, so a sample from the old entry cannot pass on the new one', async () => {
+  // 员工四号 158d01cc: freeze.json also carries flowPath (manifest.flow.path and
+  // run.start.payload.flow). A second "sample" in which only that shape differs
+  // must be red — the stand-in for "generated before the entry fix".
+  const repo = scratchCopy();
+  const sample = fs.mkdtempSync(path.join(os.tmpdir(), 'af-shape-'));
+  try {
+    const r = spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', 'linear-golden', '--flow', path.join(repo, 'flows', 'main.yaml')], { cwd: repo, env: { ...process.env, FORGE_ROOT: sample }, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const runDir = path.join(sample, '.forge', 'runs', 'linear-golden');
+    for (const f of fs.readdirSync(runDir)) if (!['events.jsonl', 'manifest.json'].includes(f)) fs.rmSync(path.join(runDir, f), { recursive: true, force: true });
+    const { createHash } = await import('node:crypto');
+    const buf = fs.readFileSync(path.join(runDir, 'events.jsonl'));
+    const record = { run: 'linear-golden', eventCount: buf.toString('utf8').split('\n').filter((l) => l.trim()).length, sha256: createHash('sha256').update(buf).digest('hex'), flowPath: path.join(repo, 'flows', 'main.yaml') };
+    fs.writeFileSync(path.join(sample, 'fold.json'), JSON.stringify(record) + '\n');
+    const run = (env) => {
+      const p = spawnSync(process.execPath, [SUITE, '--repo', repo, '--json'], { encoding: 'utf8', timeout: 300_000, env: { ...process.env, ...env } });
+      return JSON.parse(p.stdout).rows.find((x) => x.id.startsWith('V1.2a'));
+    };
+    assert.equal(run({ AF_FROZEN_DIR: sample, AF_FREEZE_FILE: 'fold.json' }).status, 'pass');
+    // The sample "came from another entry": absolute path in it, relative recorded.
+    fs.writeFileSync(path.join(sample, 'freeze.json'), JSON.stringify({ ...record, flowPath: 'flows/main.yaml' }) + '\n');
+    const red = run({ AF_FROZEN_DIR: sample });
+    assert.equal(red.status, 'fail', JSON.stringify(red.raw));
+    assert.ok(/flow=/.test(red.raw) && /MISMATCH/.test(red.raw), red.raw);
+  } finally {
+    fs.rmSync(sample, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
 });
