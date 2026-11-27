@@ -331,12 +331,138 @@ export function v3_permissionEnforced(repo) {
 }
 
 // ---------------------------------------------------------------- V4 循环与分支
-export function v4_loops(ref = process.env.AF_REF ?? 'HEAD') {
+// 员工一号 a6f842c0：负面那一半现在就能落——它只依赖校验器，不依赖编排器。
+// 判据：给一条带回边、但没有任何上限（无 on / max_iterations）的流程，同一条校验器
+// （CLI `validate --json` 与 `src/validate.js` 库入口）都必须拒绝（rc=1），码集合相同
+// （E_CYCLE / E_MISSING_EXIT 并存是既有口径，员工一号 5928fe89），E_CYCLE 的 ids 指回
+// 那条回边。反方（红）：在副本里让「裸回边」不再报 E_CYCLE → 本条必须转红；
+// 对照：同一条回边带上 max_iterations 后 CLI rc=0（不是「凡回边都拒」）。
+//
+// 正向一半（真跑一轮循环、flow.goto、按 (stage, iteration) 分格、运行时硬限制、
+// 无上限时 E_LIMIT_UNBOUNDED）等 #10 落地后由员工一号点名再写。
+// a -> build -> verify -> ops, plus an unbounded back edge ops -> verify.
+// Blocks are wired so the flow WITHOUT that back edge is accepted (the control);
+// the back edge is the one and only defect.
+const V14_NO_LIMIT_FLOW = [
+  'id: v14-no-limit',
+  'version: 1',
+  'entry: design',
+  'nodes:',
+  '  - id: design',
+  '    uses: block:design@1',
+  '    with:',
+  '      request: "{{input.request}}"',
+  '  - id: build',
+  '    uses: block:build@1',
+  '  - id: verify',
+  '    uses: block:verify@1',
+  '  - id: ops',
+  '    uses: block:ops@1',
+  'edges:',
+  '  - from: design',
+  '    to: build',
+  '  - from: build',
+  '    to: verify',
+  '  - from: verify',
+  '    to: ops',
+  '  - id: ops-to-verify',
+  '    from: ops',
+  '    to: verify',
+].join('\n') + '\n';
+const V14_BACK_EDGE = ['  - id: ops-to-verify', '    from: ops', '    to: verify', ''].join('\n');
+// Control: the same flow WITHOUT the back edge must be accepted — so the refusal
+// above is about the unbounded loop, not about the file being broken. (A bounded
+// back edge — `max_iterations: 3` — cannot serve as the control while that field
+// is P0-unsupported; it becomes the right control once #10 makes it a P0 rule.)
+const V14_FORWARD_FLOW = V14_NO_LIMIT_FLOW.replace(V14_BACK_EDGE, '');
+if (V14_FORWARD_FLOW === V14_NO_LIMIT_FLOW) throw new Error('V1.4 control: patch point not found');
+
+function cliVerdict(repo, file) {
+  const r = node(path.join(repo, 'bin', 'forge.js'), ['validate', file, '--json'], { cwd: repo });
+  let errors = null;
+  try {
+    errors = JSON.parse(r.stdout).errors;
+  } catch {
+    errors = null;
+  }
+  return { rc: r.code, errors: Array.isArray(errors) ? errors : null, line: rawLine(r.stdout || r.stderr) };
+}
+
+// The library probe runs with cwd = repo: without a project dir the validator
+// resolves `blocks/` from the flow file's nearest ancestor holding one, and a flow
+// in a bare tmp dir then comes back with a spurious E_UNKNOWN_REF. The CLI gets the
+// same `blocks/` from its FORGE_ROOT rule; this makes both judge the same project.
+function libVerdict(repo, file) {
+  const r = node(path.join(repo, 'tools', 'acceptance', 'probes', 'lib-validate.mjs'), [repo, file], { cwd: repo, env: { FORGE_ROOT: repo } });
+  let errors = null;
+  try {
+    errors = JSON.parse(r.stdout.trim()).errors;
+  } catch {
+    errors = null;
+  }
+  return { rc: r.code, errors: Array.isArray(errors) ? errors : null, line: rawLine(r.stdout || r.stderr) };
+}
+
+// Does this verdict refuse the flow *because of that back edge*? A cycle's ids are
+// the loop itself, [...loop nodes, first again] — here ["verify","ops","verify"].
+function refusesBareLeg(v) {
+  const blocked = (v.errors ?? []).filter((e) => e.severity === 'block');
+  // The cycle as the validator names it: [...loop nodes, first loop node again]
+  // (the back edge ops->verify makes this ["verify","ops","verify"]).
+  const cycle = blocked.find((e) => e.code === 'E_CYCLE' && Array.isArray(e.ids) && e.ids.length >= 2 && e.ids[0] === e.ids[e.ids.length - 1] && e.ids.includes('ops') && e.ids.includes('verify'));
+  return { ok: v.rc === 1 && !!cycle, codes: blocked.map((e) => e.code), cycle };
+}
+
+export function v4_loops(repo, ref = process.env.AF_REF ?? 'HEAD') {
   const id = `${V}.4 分支与有限循环`;
-  return row(id, '流程可带条件分支与有限循环，每轮单独成格，上限是硬限制', 'unverified', [
-    'node bin/forge.js validate fixtures/limit-suspect.yaml',
-    'node bin/forge.js validate fixtures/limit-unbounded.yaml',
-  ], '', { notes: `#10 未合入（被测 ${ref}）；落地后改写本条判据并先红后绿` });
+  const standard = '流程可带条件分支与有限循环，每轮单独成格，上限是硬限制（负面：无上限的回边必须被同一条校验器拒绝）';
+  const scratch = tempDir('af-v14-');
+  try {
+    const noLimit = path.join(scratch, 'no-limit.yaml');
+    fs.writeFileSync(noLimit, V14_NO_LIMIT_FLOW);
+    const cli = cliVerdict(repo, noLimit);
+    const lib = libVerdict(repo, noLimit);
+    const cliRefused = refusesBareLeg(cli);
+    const libRefused = refusesBareLeg(lib);
+    const sameCodes = JSON.stringify((cli.errors ?? []).map((e) => e.code)) === JSON.stringify((lib.errors ?? []).map((e) => e.code));
+    const forward = path.join(scratch, 'forward.yaml');
+    fs.writeFileSync(forward, V14_FORWARD_FLOW);
+    const forwardCli = cliVerdict(repo, forward);
+    const controlOk = forwardCli.rc === 0;
+    // Red probe: a copy where a bare back edge is no longer a cycle must turn this red.
+    const mutant = tempDir('af-v14-mut-');
+    let redOk = false;
+    let redRaw = 'patch point not found';
+    try {
+      copyDir(repo, mutant);
+      const f = path.join(mutant, 'src', 'validate.js');
+      const src = fs.readFileSync(f, 'utf8');
+      const patched = src.replace("errors.push(code('E_CYCLE', { path: `${file}#${cycle[0][0]}`", "void ({ path: `${file}#${cycle[0][0]}`");
+      if (patched !== src) {
+        fs.writeFileSync(f, patched);
+        const m = cliVerdict(mutant, noLimit);
+        redOk = !refusesBareLeg(m).ok;
+        redRaw = `mutant rc=${m.rc} codes=[${refusesBareLeg(m).codes.join(',')}]`;
+      }
+    } finally {
+      removeDir(mutant);
+    }
+    const ok = cliRefused.ok && libRefused.ok && sameCodes && controlOk && redOk;
+    const raw = `no-limit: cli rc=${cli.rc} codes=[${cliRefused.codes.join(',')}] ids=${JSON.stringify(cliRefused.cycle?.ids ?? null)}`
+      + ` | lib rc=${lib.rc} codes=[${libRefused.codes.join(',')}] libIds=${JSON.stringify(libRefused.cycle?.ids ?? null)} sameCodes=${sameCodes}`
+      + ` | control(no back edge): cli rc=${forwardCli.rc}${forwardCli.rc === 0 ? '' : ` codes=[${(forwardCli.errors ?? []).map((e) => e.code).join(',')}]`}`;
+    return row(id, standard, ok ? 'pass' : 'fail', [
+      'write <tmp>/no-limit.yaml (design→build→verify→ops, ops→verify back edge, no on / max_iterations)',
+      'node bin/forge.js validate <tmp>/no-limit.yaml --json',
+      'node tools/acceptance/probes/lib-validate.mjs <repo> <tmp>/no-limit.yaml',
+      'write <tmp>/forward.yaml (same flow, back edge removed); validate → rc=0',
+    ], raw, {
+      reds: [row(`${id}.red`, '反例：副本里裸回边不再报 E_CYCLE → 本条必须红', redOk ? 'pass' : 'fail', ['mutate src/validate.js: drop E_CYCLE'], redRaw)],
+      notes: `裸回边的码是 E_CYCLE（+ E_MISSING_EXIT，两条并存是既有口径）；E_LIMIT_UNBOUNDED 只挂在声明了 on/max_iterations 的回边上，而那两个字段在 P0 入口先报 E_P0_UNSUPPORTED，所以「无上限 → E_LIMIT_UNBOUNDED」要等 #10 把回边上限变成 P0 判据后再收紧。正向一半（真跑循环 / flow.goto / (stage,iteration) 分格 / 运行时硬限制）等 #10 落地后由员工一号点名再写（被测 ${ref}）`,
+    });
+  } finally {
+    removeDir(scratch);
+  }
 }
 
 // ---------------------------------------------------------------- V5 人只在两端

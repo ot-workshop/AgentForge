@@ -71,7 +71,7 @@ const rows = [
   await guarded('V1.2a replay==incremental==从头', () => v2_replayEquivalence(repo)),
   await guarded('V1.2b 失败定位到阶段', () => v2_failureLocated(repo)),
   await guarded('V1.3 越权被拦', () => v3_permissionEnforced(repo)),
-  await guarded('V1.4 分支与有限循环', () => v4_loops()),
+  await guarded('V1.4 分支与有限循环', () => v4_loops(repo)),
   await guarded('V1.5 人只在两端', () => v5_humanEnds(repo)),
   await guarded('D1 deploy-scripts-substantive', () => d1_deployScriptsSubstantive(repo)),
   await guarded('D2 serves-healthz-snapshot-events', () => d2_servedRunTraceable(repo)),
