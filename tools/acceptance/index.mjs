@@ -1,0 +1,97 @@
+#!/usr/bin/env node
+// Final acceptance suite (路线第 5 块, #流水线:#11).
+//
+// usage: node tools/acceptance/index.mjs --repo <checkout> [--json]
+//
+// READ-ONLY: probes run on scratch copies under os.tmpdir(); the checkout given
+// with --repo is never written to. Exit: 0 every judged row pass (unverified
+// rows do not fail the suite), 1 any judged row fail, 2 usage error.
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  gate_freezeAllowed,
+  h1_positionalRefused,
+  h2_flowPathRelative,
+  v1_sameValidator,
+  v2_failureLocated,
+  v2_replayEquivalence,
+  v3_permissionEnforced,
+  v4_loops,
+  v5_humanEnds,
+  d1_deployScriptsSmoke,
+  d2_servedRunTraceable,
+} from './lib/criteria.js';
+
+function parse(argv) {
+  const o = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--json') o.json = true;
+    else if (a === '--repo') o.repo = argv[++i];
+    else if (a === '--help' || a === '-h') o.help = true;
+    else return { error: `unknown argument: ${a}` };
+  }
+  return o;
+}
+
+const o = parse(process.argv.slice(2));
+if (o.error) {
+  process.stderr.write(`${o.error}\nusage: node tools/acceptance/index.mjs --repo <checkout> [--json]\n`);
+  process.exit(2);
+}
+if (o.help) {
+  process.stdout.write('usage: node tools/acceptance/index.mjs --repo <checkout> [--json]\n');
+  process.exit(0);
+}
+if (!o.repo) {
+  process.stderr.write('usage: node tools/acceptance/index.mjs --repo <checkout> [--json]\n');
+  process.exit(2);
+}
+const repo = path.resolve(o.repo);
+if (!fs.existsSync(path.join(repo, 'bin', 'forge.js'))) {
+  process.stderr.write(`not an AgentForge checkout: ${repo}\n`);
+  process.exit(2);
+}
+
+// A probe that throws is a FAIL row with the exception's line, never a crash:
+// an acceptance suite that cannot report is worse than one that reports red.
+function guarded(id, fn) {
+  try {
+    return fn();
+  } catch (e) {
+    return { id, standard: '(probe threw)', status: 'fail', commands: [], raw: String(e?.message ?? e).split('\n')[0] };
+  }
+}
+
+const rows = [
+  guarded('G0 freeze-allowed', () => gate_freezeAllowed(repo)),
+  guarded('H1 run-positional-arg', () => h1_positionalRefused(repo)),
+  guarded('H2 flow-path-relative', () => h2_flowPathRelative(repo)),
+  guarded('V1.1 人机同门', () => v1_sameValidator(repo)),
+  guarded('V1.2a replay==incremental==从头', () => v2_replayEquivalence(repo)),
+  guarded('V1.2b 失败定位到阶段', () => v2_failureLocated(repo)),
+  guarded('V1.3 越权被拦', () => v3_permissionEnforced(repo)),
+  guarded('V1.4 分支与有限循环', () => v4_loops()),
+  guarded('V1.5 人只在两端', () => v5_humanEnds(repo)),
+  guarded('D1 deploy-scripts-present', () => d1_deployScriptsSmoke(repo)),
+  guarded('D2 served-run-traceable', () => d2_servedRunTraceable(repo)),
+];
+
+const count = (st) => rows.filter((r) => r.status === st).length;
+const counts = { pass: count('pass'), fail: count('fail'), unverified: count('unverified') };
+
+if (o.json) {
+  process.stdout.write(JSON.stringify({ repo, rows, counts }, null, 2) + '\n');
+} else {
+  for (const r of rows) {
+    process.stdout.write(`${r.status.toUpperCase().padEnd(10)} ${r.id}\n`);
+    for (const c of r.commands) process.stdout.write(`           cmd: ${c}\n`);
+    if (r.raw) process.stdout.write(`           raw: ${r.raw}\n`);
+    if (r.notes) process.stdout.write(`           note: ${r.notes}\n`);
+    for (const red of r.reds ?? []) {
+      process.stdout.write(`           red[${red.status}] ${red.id}: ${red.raw}\n`);
+    }
+  }
+  process.stdout.write(`RESULT: PASS=${counts.pass} FAIL=${counts.fail} UNVERIFIED=${counts.unverified}\n`);
+}
+process.exitCode = counts.fail > 0 ? 1 : 0;
