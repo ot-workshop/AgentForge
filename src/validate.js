@@ -103,13 +103,15 @@ function stronglyConnected(ids, edges) {
   return out;
 }
 
-// Back edges, 员工一号 第 13 条 (aadab14f): per SCC, in file order. Repeatedly
-// take the first edge of the SCC's remaining internal list that carries a
-// positive integer max_iterations; if there is none, take the first edge whose
-// removal leaves one of its endpoints able to reach the other over the
-// remaining edges. The taken edge is a back edge and leaves the list; when no
-// edge can be taken, the SCC is done. Each loop is closed by exactly one back
-// edge. A self-loop is its own case.
+// Back edges, 员工一号 第 13 条 (aadab14f) + 第 14 条 (845e5c84): per SCC, in
+// file order. Repeatedly take the first remaining edge carrying a positive
+// integer max_iterations; if there is none, take the first edge whose removal
+// leaves its *target* able to reach its *source* AND leaves no closed cycle
+// among the remaining edges (one back edge per loop: two loops sharing one
+// back edge cannot be bounded by its single max_iterations). The taken edge is
+// a back edge and leaves the list. Every closed loop that no back edge closed
+// afterwards is returned in `open` so the caller can report E_CYCLE for it.
+// A self-loop is always a back edge.
 export function backEdgesOfScc(scc, loopEdges) {
   const list = [...loopEdges].sort((a, b) => a.index - b.index);
   const back = [];
@@ -135,17 +137,44 @@ export function backEdgesOfScc(scc, loopEdges) {
     if (!picked) {
       for (const e of list) {
         const live = list.filter((x) => x !== e);
-        if (e.from === e.to || reachesOver(e.to, e.from, live) || reachesOver(e.from, e.to, live)) {
-          picked = e;
-          break;
-        }
+        if (e.from === e.to) { picked = e; break; }
+        if (!reachesOver(e.to, e.from, live)) continue;
+        if (closedCyclesOf(live).length) continue; // leaves a loop nobody bounds
+        picked = e;
+        break;
       }
     }
     if (!picked) break;
     list.splice(list.indexOf(picked), 1);
     back.push({ ...picked, liveAfter: [...list], liveWith: [...list, picked] });
   }
-  return back;
+  return { back, open: closedCyclesOf(list) };
+}
+
+// Closed loops among `edges`: a strongly connected component of >= 2 nodes, or
+// a self-loop. Each loop comes back as a closed node list over real edges.
+export function closedCyclesOf(edges) {
+  const nodes = [...new Set(edges.flatMap((e) => [e.from, e.to]))];
+  const loops = [];
+  for (const scc of stronglyConnected(nodes, edges)) {
+    const members = new Set(scc);
+    const loopEdges = edges.filter((e) => members.has(e.from) && members.has(e.to)).sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    const self = loopEdges.find((e) => e.from === e.to);
+    if (scc.length < 2 && !self) continue;
+    if (scc.length < 2) { loops.push([self.from, self.from]); continue; }
+    const start = scc.filter((id) => loopEdges.some((e) => e.from === id)).sort()[0] ?? scc[0];
+    const path = [start];
+    let cur = start;
+    for (let guard = 0; guard < loopEdges.length + 2; guard++) {
+      const next = loopEdges.find((x) => x.from === cur && !path.slice(0, -1).some((p, i) => p === cur && path[i + 1] === x.to));
+      if (!next) break;
+      path.push(next.to);
+      cur = next.to;
+      if (cur === start) break;
+    }
+    loops.push(path[path.length - 1] === start ? path : [...path, start]);
+  }
+  return loops;
 }
 
 // `on` itself: `from` is a value source, `status` a state, an optional `check`
@@ -331,7 +360,19 @@ export function validateFlow(flow, { file = '<flow>', p0 = true, projectDir = nu
         const ref = String(withObj[req]).match(/^\{\{\s*([^}]+?)\s*\}\}$/);
         if (!ref) continue;
         const got = resolveRef(ids, blockOutputs, ref[1]);
-        if (!got) continue;
+        if (!got) {
+          // 员工一号 845e5c84: a {{...}} value that names no output is a seam error,
+          // not a silently filled input.
+          if (!seamErrors.has(e.to)) {
+            const [refNode, ...rest] = ref[1].split('.');
+            seamErrors.set(e.to, code('E_CONTRACT_MISMATCH', {
+              path: `${file}#${e.id ?? e.from + '->' + e.to}`,
+              ids: [e.from, e.to],
+              fix: { from: { nodeId: refNode, output: rest.join('.') || null }, to: { nodeId: e.to, input: req }, expected: req, actual: '(unresolved)' },
+            }));
+          }
+          continue;
+        }
         const want = target.inputTypes?.[req] ?? null;
         if (!want || !got.type || want === got.type) continue;
         if (!seamErrors.has(e.to)) {
@@ -357,6 +398,8 @@ export function validateFlow(flow, { file = '<flow>', p0 = true, projectDir = nu
   }
   // `on` itself (cb43dbad 第 1 条 / aa5f8e59): parseable, a known status, a value
   // source; an optional `check` must name one of the target's checkers.
+  // 员工一号 845e5c84: a bad `on` on a node that already has a seam error stays
+  // silent (one location per defect, cb43dbad 第 2 条). Intentional.
   for (const e of edges) {
     if (!e.on) continue;
     const bad = onError(file, e) ?? checkRefError(file, e, blockOutputs(ids.get(e.to)?.uses));
@@ -395,13 +438,16 @@ export function validateFlow(flow, { file = '<flow>', p0 = true, projectDir = nu
   // max_iterations is one E_CYCLE; ids is a closed walk from that back edge's
   // start over the edges still in the SCC's list.
   const indexed = edges.map((e, index) => ({ index, from: e.from, to: e.to, raw: e }));
+  // Node position in the file: "first in file order" must not depend on SCC walk order.
+  const nodePos = new Map(nodes.map((n, i) => [n.id, i]));
+  const fileOrder = (id) => nodePos.get(id) ?? Infinity;
   const sccs = stronglyConnected(nodes.map((n) => n.id), edges);
   for (const scc of sccs) {
     const members = new Set(scc);
     const selfLoop = indexed.some((e) => e.from === e.to && members.has(e.from));
     if (scc.length < 2 && !selfLoop) continue;
     const loopEdges = indexed.filter((e) => members.has(e.from) && members.has(e.to));
-    const back = backEdgesOfScc(scc, loopEdges);
+    const { back } = backEdgesOfScc(scc, loopEdges);
     const bad = back.find((b) => !(Number.isInteger(b.raw.max_iterations) && b.raw.max_iterations > 0));
     if (!bad) continue;
     // ids: start at the back edge's source, follow the back edge to its target,

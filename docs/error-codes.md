@@ -36,6 +36,13 @@ reports one `E_CYCLE` and `ids` is the closed node list starting at that back
 edge's source (`[a, b, a]`, every step a real edge). A self-loop without a
 positive integer `max_iterations` is `E_CYCLE` with `ids: ["u","u"]`.
 
+#流水线:#10 第 15 条 (员工一号 a9da62b8): one loop is closed by one back edge; two
+loops that share a single back edge are bounded by the runtime's counter (the
+same `loopId`, stop when exhausted), not by the validator, because the graph
+cannot tell "two loops sharing a counter" apart from "one loop that forks and
+joins". `fixtures/loop-two-bounded.yaml` is the compliant way to write it (each
+loop has its own bounded back edge, `{}`); it is not part of the tsv.
+
 `E_MISSING_EXIT` and `E_CYCLE` are inseparable in a finite P0 graph: if every node
 has an outgoing edge, the graph must contain a cycle; `missing-exit.yaml` registers
 both codes and the test compares the full code set.
@@ -54,6 +61,7 @@ both codes and the test compares the full code set.
 | `E_MISSING_EXIT` | block | false | `{action}` | rule | `fixtures/missing-exit.yaml` |
 | `E_CONTRACT_MISMATCH` | block | true | `{from:{nodeId,output}, to:{nodeId,input}, expected, actual}` | rule | `fixtures/contract-mismatch.yaml` |
 | `E_CONTRACT_MISMATCH` | block | true | `{from:{nodeId,output}, to:{nodeId,input}, expected, actual}` | rule | `fixtures/contract-vs-unbound.yaml` |
+| `E_CONTRACT_MISMATCH` | block | true | `{from:{nodeId,output}, to:{nodeId,input}, expected, actual}` | rule | `fixtures/contract-unresolved-ref.yaml` |
 | `E_UNBOUND_INPUT` | block | true | `{input, slotOf, reason, candidates[]}` | rule | `fixtures/unbound-input.yaml` |
 | `E_UNBOUND_INPUT` | block | true | `{input, slotOf, reason, candidates[]}` | rule | `fixtures/contract-unbound-only.yaml` |
 | `E_UNBOUND_INPUT` | block | true | `{input, slotOf, reason, candidates[]}` | rule | `fixtures/p0-unsupported-on.yaml` |

@@ -24,3 +24,4 @@ depth-4.yaml	E_DEPTH_EXCEEDED
 p0-unsupported-max_iterations.yaml	E_P0_UNSUPPORTED
 p0-unsupported-group.yaml	E_P0_UNSUPPORTED
 p0-unsupported-loop_id.yaml	E_P0_UNSUPPORTED
+contract-unresolved-ref.yaml	E_CONTRACT_MISMATCH
