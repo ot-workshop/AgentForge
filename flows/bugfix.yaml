@@ -1,12 +1,16 @@
 # bug-fix sample (P0.5 execution; P0 only checks that it can be written).
-# test(复现) -> build(修复自测) -> verify(测试验证) -> ops(运维合入)
+# design(plan) -> build(修复自测) -> verify(测试验证) -> ops(运维合入)
 # verify --fail(<=2 iterations)--> build   (bounded retry edge back to an ancestor)
+# verify --pass--> ops                       (leaves the loop)
+# The "test(复现)" step is not part of this sample: `test` only emits report(file)
+# and cannot feed build.plan(tree) (#流水线:#10, 员工一号 991cb4d7). The plain
+# build -> verify edge stays as the way into the loop.
 id: bugfix
 version: 1
-entry: test
+entry: design
 nodes:
-  - id: test
-    uses: block:test@1
+  - id: design
+    uses: block:design@1
     with:
       request: "{{input.request}}"
   - id: build
@@ -16,7 +20,7 @@ nodes:
   - id: ops
     uses: block:ops@1
 edges:
-  - from: test
+  - from: design
     to: build
   - from: build
     to: verify

@@ -1,0 +1,18 @@
+# 员工一号 845e5c84: `{{a.nope}}` names no output of `a` (it only has `report`),
+# so the seam is reported as unresolved instead of being silently filled.
+# #流水线:#10.
+id: contract-unresolved-ref
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:test@1
+    with:
+      request: r
+  - id: b
+    uses: block:build@1
+    with:
+      plan: "{{a.nope}}"
+edges:
+  - from: a
+    to: b

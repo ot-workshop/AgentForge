@@ -1,0 +1,11 @@
+# cb43dbad 第 2 条, negative half: `b` needs `plan(tree)` and nothing upstream
+# produces it, so the node is named once by E_UNBOUND_INPUT. The positive half is
+# contract-vs-unbound.yaml (same node, plus a type-mismatched edge into it).
+# #流水线:#10.
+id: contract-unbound-only
+version: 1
+entry: a
+nodes:
+  - id: b
+    uses: block:build@1
+edges: []

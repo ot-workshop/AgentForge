@@ -1,4 +1,6 @@
-# Uses exactly one P0.5 field: `on` on an edge.
+# `on: {from: check.result, status: fail}` on an edge is P0 since #流水线:#10.
+# This stays as the "on does not block" sample: the shape itself is valid; the
+# only defect is that `a` (build.plan) has nothing upstream to feed it.
 id: p0-on-demo
 version: 1
 entry: a

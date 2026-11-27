@@ -92,16 +92,9 @@ test('C1 flows/main.yaml and flows/bugfix.yaml are lossless through open -> expo
       assert.deepEqual(parseYaml(out), parseYaml(text), `${f}: exported YAML parses to the same document`);
       assert.deepEqual(semantics(parseFlow(out)), semantics(flow), `${f}: same nodes/edges/params`);
       const result = cliValidate(out, 'ui-export.yaml', ROOT, dir, ROOT);
-      // flows/bugfix.yaml declares a P0.5 retry edge; on P0 the validator
-      // reports exactly those fields and nothing else.
-      const expected = f.includes('bugfix')
-        ? [
-            ['E_P0_UNSUPPORTED', 'on'],
-            ['E_P0_UNSUPPORTED', 'max_iterations'],
-            ['E_P0_UNSUPPORTED', 'on_exhausted'],
-            ['E_P0_UNSUPPORTED', 'on'],
-          ]
-        : [];
+      // Since #流水线:#10 edge-level on/max_iterations are P0: both samples validate
+      // clean after a round trip (the bounded retry edge needs max_iterations).
+      const expected = [];
       assert.deepEqual(
         result.errors.map((e) => [e.code, e.fix?.field]),
         expected,

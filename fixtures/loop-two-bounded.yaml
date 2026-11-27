@@ -1,0 +1,42 @@
+# #流水线:#10: two loops sharing one SCC, each with its own bounded back edge
+# (`t->s` and `t->e` both carry on: + max_iterations). A compliant sample: {}
+# (员工一号 a9da62b8). It is not in the tsv and not in any code-set assertion.
+id: loop-two-bounded
+version: 1
+entry: s
+nodes:
+  - id: s
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: a
+    uses: block:build@1
+  - id: b
+    uses: block:build@1
+  - id: t
+    uses: block:verify@1
+  - id: e
+    uses: block:ops@1
+edges:
+  - from: s
+    to: a
+  - from: s
+    to: b
+  - from: a
+    to: t
+  - from: b
+    to: t
+  - id: t-to-s
+    from: t
+    to: s
+    on:
+      from: check.result
+      status: fail
+    max_iterations: 2
+  - id: t-to-e
+    from: t
+    to: e
+    on:
+      from: check.result
+      status: pass
+    max_iterations: 2

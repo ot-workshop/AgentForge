@@ -78,8 +78,10 @@ test('a missing input file is E_FILE_NOT_FOUND: exit 1, locatable false, fix.pat
 test('a P0.5 field yields one answer and the structural rules do not also run', async (t) => {
   if (!repoExists) return t.skip('no src/validate.js in the project under test');
   const r = await loadRepo(SRC);
-  // same order the repository CLI uses: validateP0 first, validateFlow only if clean
-  const { errors } = await judgeFlow(r, repo('fixtures/p0-unsupported-on.yaml'), { projectDir: ROOT });
+  // same order the repository CLI uses: validateP0 first, validateFlow only if clean.
+  // Since #流水线:#10 `on` on an edge is P0, so the remaining P0.5 answer is
+  // `loop_id` on a node.
+  const { errors } = await judgeFlow(r, repo('fixtures/p0-unsupported-loop_id.yaml'), { projectDir: ROOT });
   assert.ok(errors.length >= 1);
   assert.ok(errors.every((e) => e.code === 'E_P0_UNSUPPORTED'), errors.map((e) => e.code).join(','));
 });

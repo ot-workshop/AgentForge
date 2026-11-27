@@ -1,0 +1,21 @@
+# cb43dbad 第 2 条: one location per defect. `b` needs `plan(tree)` and has no
+# upstream that produces it (E_UNBOUND_INPUT on its own); the type-mismatched
+# edge `x -> b` (report:file -> plan:tree) is the seam error for that same node,
+# so `b` is named once, by the seam error. #流水线:#10.
+id: contract-vs-unbound
+version: 1
+entry: a
+nodes:
+  - id: a
+    uses: block:test@1
+    with:
+      request: r
+  - id: b
+    uses: block:build@1
+  - id: x
+    uses: block:ops@1
+edges:
+  - from: a
+    to: x
+  - from: x
+    to: b

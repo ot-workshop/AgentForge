@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { backEdgesOfScc } from '../src/validate.js';
+import { parseYaml } from '../src/yamlish.js';
 
 const FORGE = new URL('../bin/forge.js', import.meta.url).pathname;
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -44,9 +46,11 @@ test('A3.2 errors are structured and locatable ids exist in the graph', () => {
 
 test('P0: each p0-unsupported fixture yields exactly one E_P0_UNSUPPORTED naming the field', () => {
   for (const [file, field] of [
-    ['p0-unsupported-on.yaml', 'on'],
+    // Edge-level `on` is P0 since #流水线:#10 (p0-unsupported-on.yaml now validates
+    // to E_UNBOUND_INPUT); node-level `loop_id` and `group` stay P0.5.
     ['p0-unsupported-max_iterations.yaml', 'max_iterations'],
     ['p0-unsupported-group.yaml', 'group'],
+    ['p0-unsupported-loop_id.yaml', 'loop_id'],
   ]) {
     const r = validate('fixtures/' + file);
     assert.equal(r.status, 1);
@@ -55,4 +59,16 @@ test('P0: each p0-unsupported fixture yields exactly one E_P0_UNSUPPORTED naming
     assert.equal(errs[0].code, 'E_P0_UNSUPPORTED');
     assert.ok(errs[0].path.includes(field), errs[0].path);
   }
+});
+
+
+test('#10: the back edge of a bounded loop is the edge that carries max_iterations (bugfix)', () => {
+  const file = path.join(ROOT, 'flows/bugfix.yaml');
+  const doc = parseYaml(fs.readFileSync(file, 'utf8'), file);
+  const nodes = doc.nodes.map((n) => n.id);
+  const edges = doc.edges.map((e, index) => ({ index, from: e.from, to: e.to, raw: e }));
+  const members = new Set(nodes);
+  const loopEdges = edges.filter((e) => members.has(e.from) && members.has(e.to));
+  const { back } = backEdgesOfScc(nodes, loopEdges);
+  assert.deepEqual(back.map((b) => [b.from, b.to, b.raw.max_iterations]), [['verify', 'build', 2]]);
 });
