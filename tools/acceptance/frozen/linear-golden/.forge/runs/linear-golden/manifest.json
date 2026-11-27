@@ -1,0 +1,29 @@
+{
+  "run_id": "linear-golden",
+  "run_started_at": "2026-11-27T08:10:32.318Z",
+  "flow": {
+    "path": "flows/main.yaml",
+    "sha256": "75be6f0eb85a9ce426bc2b4670149cc090dbd38f6e19b157502e2280742f91e6"
+  },
+  "blocks": {
+    "design": {
+      "ref": "block:design@1",
+      "sha256": "7ab6681a94c7c35175e68bda268c9f2f6552549ce8d546658ed9b221ade348e0",
+      "validator": "forge-protocol-v1",
+      "result": "ok"
+    },
+    "build": {
+      "ref": "block:build@1",
+      "sha256": "31f80efade8a9dd033721e1ef127a2684e411599908929fb342975f8f04c44d1",
+      "validator": "forge-protocol-v1",
+      "result": "ok"
+    },
+    "verify": {
+      "ref": "block:verify@1",
+      "sha256": "f46c8bf707a19da48525c1c05f4c1e59608af6399fb0d23c32307e2abfda5fde",
+      "validator": "forge-protocol-v1",
+      "result": "ok"
+    }
+  },
+  "status": "ok"
+}
