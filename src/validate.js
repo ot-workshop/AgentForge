@@ -109,9 +109,9 @@ function stronglyConnected(ids, edges) {
 // leaves its *target* able to reach its *source* AND leaves no closed cycle
 // among the remaining edges (one back edge per loop: two loops sharing one
 // back edge cannot be bounded by its single max_iterations). The taken edge is
-// a back edge and leaves the list. Every closed loop that no back edge closed
-// afterwards is returned in `open` so the caller can report E_CYCLE for it.
-// A self-loop is always a back edge.
+// a back edge and leaves the list. A self-loop is always a back edge. Loops
+// that share a back edge are the runtime counter's business (第 15 条).
+// `closedCyclesOf` stays for the tests that assert the shape of a loop.
 export function backEdgesOfScc(scc, loopEdges) {
   const list = [...loopEdges].sort((a, b) => a.index - b.index);
   const back = [];
@@ -147,12 +147,12 @@ export function backEdgesOfScc(scc, loopEdges) {
     list.splice(list.indexOf(picked), 1);
     back.push({ ...picked, liveAfter: [...list], liveWith: [...list, picked] });
   }
-  return { back, open: closedCyclesOf(list) };
+  return { back };
 }
 
 // Closed loops among `edges`: a strongly connected component of >= 2 nodes, or
 // a self-loop. Each loop comes back as a closed node list over real edges.
-export function closedCyclesOf(edges) {
+function closedCyclesOf(edges) {
   const nodes = [...new Set(edges.flatMap((e) => [e.from, e.to]))];
   const loops = [];
   for (const scc of stronglyConnected(nodes, edges)) {
