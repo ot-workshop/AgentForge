@@ -1,0 +1,12 @@
+{
+  "run": "linear-golden",
+  "base": "9b7ed8d570f5d7f9ae843b4077a23d0e2e3fa628",
+  "flow": "flows/main.yaml",
+  "eventCount": 8,
+  "sha256": "8232a6a671f1d161eb6f3cf0ecd5f8f479504b6352ba265feb7ca34a8a965b9b",
+  "flowPath": "flows/main.yaml",
+  "flowSha256": "75be6f0eb85a9ce426bc2b4670149cc090dbd38f6e19b157502e2280742f91e6",
+  "startFlow": "flows/main.yaml",
+  "manifestRunStartedAt": "2026-11-27T08:10:32.318Z",
+  "firstEventTs": "2026-11-27T08:10:32.318Z"
+}

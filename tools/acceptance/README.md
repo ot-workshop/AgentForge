@@ -50,3 +50,18 @@ deliberately calls the library validator, so it also runs from outside a checkou
 lands under `<root>/<sha>/`, writes `deploy-report-<short>.md`, and stops the old
 instance before starting the new one. That needs an exclusive port and is run by a
 person, never by this suite.
+
+## Frozen sample
+
+`tools/acceptance/frozen/linear-golden/` holds one run produced on base
+`9b7ed8d5` with `forge run --run linear-golden --flow flows/main.yaml`:
+
+- `.forge/runs/linear-golden/events.jsonl` + `manifest.json` only (no `context/`,
+  no `checks.lock`, no `.events-lock`);
+- `freeze.json` — `run`, `base`, `eventCount`, `sha256` of `events.jsonl`,
+  `flowPath` (`manifest.flow.path == run.start.payload.flow == "flows/main.yaml"`),
+  `flowSha256`, `startFlow`, and the run's timestamps.
+
+`freeze.json` is written once at freeze time and is the authority on "how many
+events, and which flow shape" the sample had; a sample taken on a different entry
+shape shows up as `MISMATCH`, not as a pass.

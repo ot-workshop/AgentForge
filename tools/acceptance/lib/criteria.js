@@ -136,7 +136,7 @@ function flowShape(sampleDir, run) {
   try {
     const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8'));
     const first = JSON.parse(fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8').split('\n')[0]);
-    return { manifestFlow: manifest.flow?.path ?? null, startFlow: first.payload?.flow ?? null };
+    return { manifestFlow: manifest.flow?.path ?? null, flowSha256: manifest.flow?.sha256 ?? null, startFlow: first.payload?.flow ?? null };
   } catch {
     return null;
   }
@@ -193,6 +193,10 @@ export async function v2_replayEquivalence(repo) {
         ? [
             { what: 'manifest.flow.path', want: rec.flowPath, got: shape?.manifestFlow },
             { what: 'run.start.payload.flow', want: rec.flowPath, got: shape?.startFlow },
+            // Recorded separately when present: the two places may legitimately be
+            // described separately in freeze.json (员工一号 26995e2e).
+            ...(rec.startFlow !== undefined ? [{ what: 'run.start.payload.flow(recorded)', want: rec.startFlow, got: shape?.startFlow }] : []),
+            ...(rec.flowSha256 !== undefined ? [{ what: 'manifest.flow.sha256', want: rec.flowSha256, got: shape?.flowSha256 }] : []),
           ]
         : [];
       const shapeMismatch = shapeChecks.filter((c) => c.got !== c.want);

@@ -33,6 +33,19 @@ function scratchCopy() {
 
 const pickOne = (repo) => runSuite(repo);
 
+// `forge run --flow` now takes a path inside the project root (#10): a flow in the
+// repo itself is "outside" a scratch FORGE_ROOT. These tests therefore copy flows/
+// into the scratch root and run from there.
+function seedRun(repo, root, runId = 'linear-golden') {
+  fs.cpSync(path.join(repo, 'flows'), path.join(root, 'flows'), { recursive: true });
+  return spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', runId, '--flow', 'flows/main.yaml'], {
+    cwd: root,
+    env: { ...process.env, FORGE_ROOT: root },
+    encoding: 'utf8',
+  });
+}
+
+
 describe('final acceptance suite', { skip: process.env.AF_REPO ? false : 'AF_REPO not set' }, () => {
 test('baseline: the suite runs and reports one row per criterion', () => {
   const { json } = pickOne(REPO);
@@ -93,16 +106,20 @@ test('V1.3 goes red when the orchestrator does not notice a tampered checker', (
   }
 });
 
-test('H1 goes green only when a positional flow argument is refused', () => {
+test('H1 goes red when a positional flow argument is accepted again', () => {
   const dir = scratchCopy();
   try {
+    // #10 made H1 green by refusing positional args. To prove the row still
+    // discriminates, the copy puts back the pre-#10 behaviour: a positional flow
+    // argument is simply used (run --flow / a bare path behave alike).
     const f = path.join(dir, 'src', 'cli.js');
     const s = fs.readFileSync(f, 'utf8');
+    const guard = "        if (opts._.length) {";
+    assert.ok(s.includes(guard), 'positional guard not found');
     const patched = s.replace(
-      "flowPath: opts.flow && opts.flow !== true ? path.resolve(opts.flow) : null,",
-      "flowPath: opts.flow && opts.flow !== true ? path.relative(root(), path.resolve(opts.flow)) : opts._[0] ? (() => { throw Object.assign(new Error('E_INVALID_ARGS'), { errors: [structuredError({ code: 'E_INVALID_ARGS', severity: 'block', locatable: true, path: String(opts._[0]), ids: [], fix: { action: 'use --flow <path>' } })], exitCode: 1 }); })() : null,",
-    );
-    assert.notEqual(patched, s, 'patch point not found');
+      guard,
+      "        if (opts._.length && !opts.flow) opts.flow = opts._[0];\n        if (opts._.length) {",
+    ).replace("        if (opts._.length) {\n          throw {", "        if (false) {\n          throw {");
     fs.writeFileSync(f, patched);
     const { json } = pickOne(dir);
     const h1 = json.rows.find((r) => r.id.startsWith('H1'));
@@ -187,11 +204,7 @@ test('V1.2a: a hand-made sample dir judges on its own, and shortcuts still go re
   const repo = scratchCopy();
   const sample = fs.mkdtempSync(path.join(os.tmpdir(), 'af-sample-'));
   try {
-    const r = spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', 'linear-golden', '--flow', path.join(repo, 'flows', 'main.yaml')], {
-      cwd: repo,
-      env: { ...process.env, FORGE_ROOT: sample },
-      encoding: 'utf8',
-    });
+    const r = seedRun(repo, sample);
     assert.equal(r.status, 0, r.stderr);
     const runDir = path.join(sample, '.forge', 'runs', 'linear-golden');
     for (const f of fs.readdirSync(runDir)) if (f !== 'events.jsonl' && f !== 'manifest.json') fs.rmSync(path.join(runDir, f), { recursive: true, force: true });
@@ -244,7 +257,7 @@ test('V1.2a cannot be fooled by a self-consistent, truncated sample', async () =
   const repo = scratchCopy();
   const sample = fs.mkdtempSync(path.join(os.tmpdir(), 'af-sample-g-'));
   try {
-    const r = spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', 'linear-golden', '--flow', path.join(repo, 'flows', 'main.yaml')], { cwd: repo, env: { ...process.env, FORGE_ROOT: sample }, encoding: 'utf8' });
+    const r = seedRun(repo, sample);
     assert.equal(r.status, 0, r.stderr);
     const runDir = path.join(sample, '.forge', 'runs', 'linear-golden');
     for (const f of fs.readdirSync(runDir)) if (!['events.jsonl', 'manifest.json'].includes(f)) fs.rmSync(path.join(runDir, f), { recursive: true, force: true });
@@ -273,13 +286,13 @@ test('V1.2a records the flow shape, so a sample from the old entry cannot pass o
   const repo = scratchCopy();
   const sample = fs.mkdtempSync(path.join(os.tmpdir(), 'af-shape-'));
   try {
-    const r = spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', 'linear-golden', '--flow', path.join(repo, 'flows', 'main.yaml')], { cwd: repo, env: { ...process.env, FORGE_ROOT: sample }, encoding: 'utf8' });
+    const r = seedRun(repo, sample);
     assert.equal(r.status, 0, r.stderr);
     const runDir = path.join(sample, '.forge', 'runs', 'linear-golden');
     for (const f of fs.readdirSync(runDir)) if (!['events.jsonl', 'manifest.json'].includes(f)) fs.rmSync(path.join(runDir, f), { recursive: true, force: true });
     const { createHash } = await import('node:crypto');
     const buf = fs.readFileSync(path.join(runDir, 'events.jsonl'));
-    const record = { run: 'linear-golden', eventCount: buf.toString('utf8').split('\n').filter((l) => l.trim()).length, sha256: createHash('sha256').update(buf).digest('hex'), flowPath: path.join(repo, 'flows', 'main.yaml') };
+    const record = { run: 'linear-golden', eventCount: buf.toString('utf8').split('\n').filter((l) => l.trim()).length, sha256: createHash('sha256').update(buf).digest('hex'), flowPath: 'flows/main.yaml' };
     fs.writeFileSync(path.join(sample, 'fold.json'), JSON.stringify(record) + '\n');
     const run = (env) => {
       const p = spawnSync(process.execPath, [SUITE, '--repo', repo, '--json'], { encoding: 'utf8', timeout: 300_000, env: { ...process.env, ...env } });
@@ -287,13 +300,39 @@ test('V1.2a records the flow shape, so a sample from the old entry cannot pass o
     };
     assert.equal(run({ AF_FROZEN_DIR: sample, AF_FREEZE_FILE: 'fold.json' }).status, 'pass');
     // The sample "came from another entry": absolute path in it, relative recorded.
-    fs.writeFileSync(path.join(sample, 'freeze.json'), JSON.stringify({ ...record, flowPath: 'flows/main.yaml' }) + '\n');
+    const recAbs = { ...record, flowPath: 'flows/main.yaml' };
+    fs.writeFileSync(path.join(sample, 'freeze.json'), JSON.stringify(recAbs) + '\n');
+    const manifestAbs = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8'));
+    manifestAbs.flow.path = path.join(sample, 'flows', 'main.yaml');
+    fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifestAbs, null, 2) + '\n');
+    const evLines = fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8').split('\n');
+    const firstEv = JSON.parse(evLines[0]);
+    firstEv.payload.flow = path.join(sample, 'flows', 'main.yaml');
+    evLines[0] = JSON.stringify(firstEv);
+    fs.writeFileSync(path.join(runDir, 'events.jsonl'), evLines.join('\n'));
     const red = run({ AF_FROZEN_DIR: sample });
     assert.equal(red.status, 'fail', JSON.stringify(red.raw));
     assert.ok(/flow=/.test(red.raw) && /MISMATCH/.test(red.raw), red.raw);
   } finally {
     fs.rmSync(sample, { recursive: true, force: true });
     fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+test('H2 probe goes red when the recorded flow path becomes absolute', () => {
+  // H2 is about the RECORDED form: #10 makes run.js write flowRecord (relative).
+  // Reverting that one decision (record what was resolved, as before) must be red.
+  const dir = scratchCopy();
+  try {
+    const f = path.join(dir, 'src', 'run.js');
+    const s = fs.readFileSync(f, 'utf8');
+    const marker = '  const flowRecord = flowPath == null ? null : recordFlowPath(flowPath, rootDir);';
+    assert.ok(s.includes(marker), 'recordFlowPath call not found');
+    fs.writeFileSync(f, s.replace(marker, '  const flowRecord = flowPath; // revert: record absolute'));
+    const { json } = pickOne(dir);
+    const h2 = json.rows.find((r) => r.id.startsWith('H2'));
+    assert.equal(h2.status, 'fail', JSON.stringify(h2.raw));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 });
