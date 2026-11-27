@@ -139,7 +139,6 @@ export function backEdgesOfScc(scc, loopEdges) {
         const live = list.filter((x) => x !== e);
         if (e.from === e.to) { picked = e; break; }
         if (!reachesOver(e.to, e.from, live)) continue;
-        if (closedCyclesOf(live).length) continue; // leaves a loop nobody bounds
         picked = e;
         break;
       }
