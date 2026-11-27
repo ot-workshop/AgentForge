@@ -173,6 +173,34 @@ test('D2 goes red when /events stops streaming run.start', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+test('V1.4 goes red when an unbounded back edge is no longer refused', () => {
+  const dir = scratchCopy();
+  try {
+    const v14 = pickOne(dir).json.rows.find((r) => r.id.startsWith('V1.4'));
+    assert.equal(v14.status, 'pass', JSON.stringify(v14));
+    // The cycle is the one this flow owns, both entry points name the same ids,
+    // and the control flow without the back edge is accepted: the refusal is
+    // about the loop, not about the file being broken.
+    assert.match(v14.raw, /codes=\[.*E_CYCLE/, v14.raw);
+    assert.match(v14.raw, /libIds=\["verify","ops","verify"\]/, v14.raw);
+    assert.match(v14.raw, /sameCodes=true/, v14.raw);
+    assert.match(v14.raw, /control\(no back edge\): cli rc=0/, v14.raw);
+    assert.equal(v14.reds[0].status, 'pass', JSON.stringify(v14.reds));
+
+    // Drop E_CYCLE from the shared validator: the unbounded loop is no longer
+    // refused by either entry point, and the row must go red.
+    const f = path.join(dir, 'src', 'validate.js');
+    const src = fs.readFileSync(f, 'utf8');
+    const patched = src.replace("errors.push(code('E_CYCLE', { path: `${file}#${cycle[0][0]}`", "void ({ path: `${file}#${cycle[0][0]}`");
+    assert.notEqual(patched, src, 'patch point not found');
+    fs.writeFileSync(f, patched);
+    const red = pickOne(dir).json.rows.find((r) => r.id.startsWith('V1.4'));
+    assert.equal(red.status, 'fail', JSON.stringify(red));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('V1.5 goes red when src/ can write a human acceptance event', () => {
   const dir = scratchCopy();
   try {
