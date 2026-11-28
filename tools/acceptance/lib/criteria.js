@@ -19,6 +19,51 @@ function row(id, standard, status, commands, raw, extra = {}) {
   return { id, standard, status, commands, raw, ...extra };
 }
 
+// Patch one file of a copied checkout. `from` must be unique: a wrong patch point
+// throws, and the caller records the red as "the row did not go red".
+function patchFile(copy, file, from, to) {
+  const f = path.join(copy, file);
+  const s = fs.readFileSync(f, 'utf8');
+  const n = s.split(from).length - 1;
+  if (n !== 1) throw new Error(`${file}: patch point found ${n}x: ${from}`);
+  fs.writeFileSync(f, s.replace(from, to));
+  return `${file}: ${from.trim()} -> ${to.trim()}`;
+}
+
+// A red for a row that is cheap to judge: copy the checkout, break one thing, re-run
+// ONLY that row in a child (`probes/m3-row.mjs`, which loads THIS suite, so the copy's
+// own suite is never picked up). The row is red when it reports `fail` and its
+// stage.start sequence differs from the one the real checkout produced.
+function redOn(repo, rid, what, mutate, sibling, wantStarts) {
+  let copy = null;
+  try {
+    copy = tempDir('af-red-');
+    copyDir(repo, copy);
+    const patchNote = mutate(copy);
+    const rowProbe = path.join(suiteDir(), 'probes', 'm3-row.mjs');
+    const r = runCmd(process.execPath, [rowProbe, copy], {
+      timeoutMs: RED_CHILD_TIMEOUT_MS,
+      env: { AF_ACCEPTANCE_DIR: suiteDir(), AF_RUN_TIMEOUT_MS: String(RUN_TIMEOUT_MS) },
+    });
+    let j = null;
+    try {
+      j = JSON.parse(r.stdout.trim());
+    } catch {
+      j = null;
+    }
+    if (!j || typeof j.status !== 'string') {
+      return row(`${sibling}.red ${rid}`, what, 'fail', [rid], `row did not report (${r.signal ?? r.error?.code ?? r.code}): ${rawLine(r.stderr)}`);
+    }
+    const changed = j.starts != null && JSON.stringify(j.starts) !== JSON.stringify(wantStarts);
+    const red = j.status === 'fail' && changed;
+    return row(`${sibling}.red ${rid}`, what, red ? 'pass' : 'fail', [rid], `${patchNote}; row ${j.status}; starts=${JSON.stringify(j.starts)}${j.error ? `; ${j.error}` : ''}`);
+  } catch (e) {
+    return row(`${sibling}.red ${rid}`, what, 'fail', [rid], String(e?.message ?? e).split('\n')[0]);
+  } finally {
+    if (copy) removeDir(copy);
+  }
+}
+
 // One `forge` invocation in a scratch root; returns the parsed stdout JSON and rc.
 function forgeJson(repo, args, env = {}) {
   const r = node(path.join(repo, 'bin', 'forge.js'), args, { env: { FORGE_ROOT: repo, ...env }, timeoutMs: RUN_TIMEOUT_MS });
@@ -911,6 +956,73 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
 //  ①  一次正常跑完的 run 里，没有任何事件的 actor.kind=human，也没有 type 以 accept 结尾；
 //  ②  src/ 里没有任何写这类事件的代码路径（防「写了没触发」）。
 // 这是负向判据：正向那一半（真正的人工验收命令）等 #9 第 3 块落地再补。
+// M3 (员工一号 56bb871f, #流水线:#13): `stage.start.iteration` is a stage's own entry
+// count. The flow below re-enters `design` and `build` through ONE bounded back edge, so
+// both stages have two entries (@1, @2). A walk that uses the goto's number for the stage,
+// or resets the count on every entry, writes @1 twice and this row goes red.
+const M3_FLOW = 'tools/acceptance/fixtures/m3-entry-counter.yaml';
+// The stage.start sequence the row last read; a red compares its copy's against it.
+// A getter on an object is what a probe can read after the module namespace: an
+// exported `let` would be a stale copy on the namespace object.
+export const __m3 = { lastStarts: null };
+export function m3_entryCount(repo, { reds: withReds = WITH_REDS } = {}) {
+  const id = 'M3 阶段自己计数（再次进入 @2，不借 goto 的号）';
+  const standard = 'stage.start.iteration 是"第几次进入这个阶段"：经回边再进的 design/build 是 @2，不是 @1、也不是 goto 的号';
+  const dir = scratchCheckout(repo);
+  try {
+    const fsPath = path.join(repo, M3_FLOW);
+    fs.mkdirSync(path.join(dir, 'tools', 'acceptance', 'fixtures'), { recursive: true });
+    fs.copyFileSync(fsPath, path.join(dir, M3_FLOW));
+    const cli = node(path.join(dir, 'bin', 'forge.js'), ['validate', M3_FLOW, '--json'], { cwd: dir, env: { FORGE_ROOT: dir }, timeoutMs: RUN_TIMEOUT_MS });
+    let cliErrors = null;
+    try {
+      cliErrors = JSON.parse(cli.stdout).errors;
+    } catch {
+      cliErrors = null;
+    }
+    const run = runIn(dir, 'm3-entry', M3_FLOW, 'retry-verify:1', { timeoutMs: RUN_TIMEOUT_MS });
+    const starts = startsOf(run.events);
+    __m3.lastStarts = starts;
+    const gotos = gotosOf(run.events);
+    const end = lastOf(run.events);
+    const checks = [];
+    const check = (what, fn, cmd) => {
+      const [ok, raw] = fn();
+      checks.push({ what, ok: Boolean(ok), raw, cmd });
+    };
+    check('0 这个 flow 过 validate（不然 M3 测的是另一个东西）', () => [
+      cli.code === 0 && same(cliErrors, []),
+      `rc=${cli.code} errors=${JSON.stringify(cliErrors)}`,
+    ], `node bin/forge.js validate ${M3_FLOW} --json`);
+    check('1 走完一轮就结束：design→build→verify fail→goto→design→build→verify ok→fix→ops，run.end ok', () => [
+      run.code === 0 && end?.type === 'run.end' && end.payload.status === 'ok' && gotos.length === 1,
+      `rc=${run.code} gotos=${gotos.length} run.end=${JSON.stringify(end?.payload ?? null)}`,
+    ], `FORGE_FAKE=retry-verify:1 node bin/forge.js run --run m3-entry --flow ${M3_FLOW}`);
+    check('2 再次进入的阶段是 @2（design、build），不是 @1、不是 goto 的号', () => [
+      same(starts, ['design@1', 'build@1', 'verify@1', 'design@2', 'build@2', 'verify@2', 'fix@1', 'ops@1']),
+      `stage.start: ${JSON.stringify(starts)}`,
+    ], 'read m3-entry events.jsonl');
+    check('3 goto 的 iteration 是 1，且再次进入没有第二个 goto', () => [
+      gotos.length === 1 && gotos[0].payload.iteration === 1 && gotos[0].payload.loopId === 'verify-back',
+      `goto ${JSON.stringify(gotos.map((g) => [g.payload.loopId, g.payload.iteration]))}`,
+    ], 'read m3-entry events.jsonl');
+    const reds = withReds
+      ? [
+          redOn(repo, 'M3.red1 reset-visit-count', '阶段计数每次写 1（不复用之前的进入数）', (copy) => patchFile(copy, 'src/run.js', 'const visited = (visitCount.get(stage) ?? 0) + 1;', 'const visited = 1;'), id, starts),
+          redOn(repo, 'M3.red2 goto-number', '阶段的 iteration 借 goto 的号（design@2 写成 @1）', (copy) => patchFile(copy, 'src/run.js', '      const iteration = visited;\n', '      const iteration = 1;\n'), id, starts),
+        ]
+      : [];
+    const failed = checks.filter((c) => !c.ok);
+    const ok = failed.length === 0 && (withReds ? reds.every((r) => r.status === 'pass') : true);
+    if (ok) {
+      return row(id, standard, 'pass', checks.filter((c) => c.cmd).map((c) => c.cmd), checks.map((c) => c.raw).join(' | '), { reds });
+    }
+    return row(id, standard, 'fail', failed.map((c) => c.cmd ?? c.what), failed.map((c) => `${c.what}: ${c.raw}`).join(' | '), { reds });
+  } finally {
+    removeDir(dir);
+  }
+}
+
 export function v5_humanEnds(repo) {
   const id = `${V}.5 人只在两端`;
   const standard = 'forge run 自己绝不产生 human 事件，manifest 里没有任何「已验收」字段';
