@@ -960,6 +960,14 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
 // count. The flow below re-enters `design` and `build` through ONE bounded back edge, so
 // both stages have two entries (@1, @2). A walk that uses the goto's number for the stage,
 // or resets the count on every entry, writes @1 twice and this row goes red.
+//
+// KNOWN BOUNDARY (员工一号 3b69e54e): "re-enter without a goto AND finish in one turn"
+// cannot be written under 第 13 条 -- a plain edge that sends control from outside a loop
+// back into it makes a second back edge in the same SCC, and the validator reports
+// E_CYCLE ids ["build","verify","design","build"]. A plain-edge re-entry that does pass
+// (`fix -> build`, `build@3`) only ends after the loop's bound is spent, so judging it
+// here would mix a long walk into this row. This row therefore judges the goto target's
+// `stage.start.iteration = @2` and the counter's independence from the goto number.
 const M3_FLOW = 'tools/acceptance/fixtures/m3-entry-counter.yaml';
 // The stage.start sequence the row last read; a red compares its copy's against it.
 // A getter on an object is what a probe can read after the module namespace: an
