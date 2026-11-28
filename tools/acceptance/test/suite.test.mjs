@@ -361,3 +361,23 @@ test('H2 probe goes red when the recorded flow path becomes absolute', () => {
   }
 });
 });
+
+test('M3 goes red when stage.start.iteration borrows the goto number or resets', () => {
+  // 员工一号 56bb871f / 6a0c7e4c: the M3 row judges "the stage counts its own entries".
+  // Neither a walk that resets the count (`visited = 1`) nor one that drops the counter
+  // (`visited = iteration`) may pass it. The row's own reds cover both; this test pins
+  // that the row is green on a clean copy and both of its reds are green.
+  const dir = scratchCopy();
+  try {
+    fs.cpSync(path.join(REPO, 'tools', 'acceptance', 'fixtures', 'm3-entry-counter.yaml'), path.join(dir, 'tools', 'acceptance', 'fixtures', 'm3-entry-counter.yaml'));
+    const { json } = pickOne(dir);
+    const row = json.rows.find((r) => r.id.startsWith('M3 '));
+    assert.equal(row.status, 'pass', JSON.stringify({ raw: row.raw, reds: row.reds }));
+    const reds = row.reds ?? [];
+    assert.equal(reds.length, 2, JSON.stringify(reds));
+    for (const red of reds) assert.equal(red.status, 'pass', JSON.stringify(red));
+    assert.ok(/design@1","build@1","verify@1","design@2","build@2","verify@2/.test(row.raw), row.raw);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

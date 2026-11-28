@@ -1,0 +1,44 @@
+# M3 (#流水线:#13): `stage.start.iteration` is the stage's own entry count, not the
+# goto's number.
+#   design -> build -> verify --fail(bound 2)--> design    (one back edge)
+#   verify --pass--> fix --pass--> build                   (plain edges; short walk)
+# `retry-verify:1`: verify fails once, the goto re-enters design (@2), verify passes,
+# fix passes, and the run ends. `build` is entered twice (@1 by design, @2 by the goto)
+# and `design` twice (@1, @2) -- a walk that counts gotos instead of entries writes
+# `build@1` on the second entry (red2), and one that resets the counter writes @1 on
+# every entry (员工一号 56bb871f 的反例).
+id: m3-entry-counter
+version: 1
+entry: design
+nodes:
+  - id: design
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: build
+    uses: block:build@1
+  - id: verify
+    uses: block:verify@1
+  - id: fix
+    uses: block:ops@1
+  - id: ops
+    uses: block:ops@1
+edges:
+  - from: design
+    to: build
+  - from: build
+    to: verify
+  - id: verify-back
+    from: verify
+    to: design
+    on:
+      from: check.result
+      status: fail
+    max_iterations: 2
+  - from: verify
+    to: fix
+    on:
+      from: check.result
+      status: pass
+  - from: fix
+    to: ops
