@@ -34,10 +34,12 @@ function scratchCopy() {
 const pickOne = (repo) => runSuite(repo);
 
 // `forge run --flow` now takes a path inside the project root (#10): a flow in the
-// repo itself is "outside" a scratch FORGE_ROOT. These tests therefore copy flows/
-// into the scratch root and run from there.
+// repo itself is "outside" a scratch FORGE_ROOT. These tests therefore copy flows/ --
+// and blocks/, agents/, checks/, because since #10 `run` validates the flow first and
+// a flow whose blocks/ it cannot find is refused (E_UNKNOWN_REF) -- into the scratch
+// root and run from there.
 function seedRun(repo, root, runId = 'linear-golden') {
-  fs.cpSync(path.join(repo, 'flows'), path.join(root, 'flows'), { recursive: true });
+  for (const d of ['flows', 'blocks', 'agents', 'checks']) fs.cpSync(path.join(repo, d), path.join(root, d), { recursive: true });
   return spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', runId, '--flow', 'flows/main.yaml'], {
     cwd: root,
     env: { ...process.env, FORGE_ROOT: root },
@@ -63,7 +65,8 @@ test('V1.1 goes red when the library validator disagrees with the CLI', () => {
     // must catch as a red row rather than paper over.
     const f = path.join(dir, 'src', 'validate.js');
     const src = fs.readFileSync(f, 'utf8');
-    const patched = src.replace("errors.push(code('E_CYCLE', { path: `${file}#${cycle[0][0]}`", "void ({ path: `${file}#${cycle[0][0]}`");
+    // #14 rewrote the cycle rule (per SCC): drop the E_CYCLE it emits per SCC.
+    const patched = src.replace("    errors.push(code('E_CYCLE', { path: `${file}#${ids[0]}`", "    void ({ path: `${file}#${ids[0]}`");
     assert.notEqual(patched, src, 'patch point not found');
     fs.writeFileSync(f, patched);
     // Equal verdicts (true) but invalid flows no longer refused: the red probes
@@ -318,6 +321,28 @@ test('V1.2a records the flow shape, so a sample from the old entry cannot pass o
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+test('V1.4 records a run that never ends as a failed row, within its SIGKILL limit', () => {
+  // 员工一号 580cfa1d 第 2 条: "这一行跑不完必须报成本行失败". A bounded loop whose bound is its
+  // only exit turns into a walk that never ends once the bound check is gone; with a 5s
+  // per-run limit the row must come back red (and say so) instead of holding the suite.
+  const dir = scratchCopy();
+  const t0 = Date.now();
+  try {
+    const f = path.join(dir, 'src', 'run.js');
+    const src = fs.readFileSync(f, 'utf8');
+    const patched = src.replace('if (used + 1 > limit) {', 'if (false) {');
+    assert.notEqual(patched, src, 'bound check not found in src/run.js');
+    fs.writeFileSync(f, patched);
+    const r = spawnSync(process.execPath, [SUITE, '--repo', dir, '--json'], { encoding: 'utf8', timeout: 600_000, env: { ...process.env, AF_RUN_TIMEOUT_MS: '5000' } });
+    const row = JSON.parse(r.stdout).rows.find((x) => x.id.startsWith('V1.4 '));
+    assert.equal(row.status, 'fail', JSON.stringify({ raw: row.raw, reds: row.reds }));
+    assert.ok(/killed after 5000ms|E_LIMIT_UNBOUNDED|fail/.test(row.raw), row.raw);
+    assert.ok(Date.now() - t0 < 540_000, `row took ${Date.now() - t0}ms`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('H2 probe goes red when the recorded flow path becomes absolute', () => {
   // H2 is about the RECORDED form: #10 makes run.js write flowRecord (relative).
   // Reverting that one decision (record what was resolved, as before) must be red.

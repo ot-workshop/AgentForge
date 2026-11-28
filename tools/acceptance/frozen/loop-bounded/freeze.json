@@ -1,0 +1,21 @@
+{
+  "run": "loop-bounded",
+  "base": "4de2dea434887974970b50f9e0d54c0309eb84b2",
+  "flow": "fixtures/loop-bounded.yaml",
+  "fake": "retry-verify:2",
+  "eventCount": 20,
+  "sha256": "f497796eb54b33484476676fc2d5d3141aa50cd57acf2c0c30c4fea260011a81",
+  "flowPath": "fixtures/loop-bounded.yaml",
+  "flowSha256": "ac7a04eebfc2eab641b047ca6655c3ee202e0e6c240e8d0408ef4f5151e8b2d0",
+  "startFlow": "fixtures/loop-bounded.yaml",
+  "manifestRunStartedAt": "2026-11-27T22:18:47.275Z",
+  "firstEventTs": "2026-11-27T22:18:47.275Z",
+  "compare": "event type order; stage.end.status; (stage,iteration); flow.goto from/to/iteration/loopId/checkResultId; run.end payload",
+  "excluded": [
+    "ts",
+    "hash",
+    "prev",
+    "stage.start.payload.contextSha256"
+  ],
+  "excludedWhy": "writeContext hashes ctx = {runId, stage, iteration, prevArtifacts}; runId is the run dir name, so contextSha256 is decided by the run, not the flow (\u5458\u5de5\u4e00\u53f7 918356de, \u5458\u5de5\u4e8c\u53f7 83e69916). Byte equality across directories is M3's business."
+}

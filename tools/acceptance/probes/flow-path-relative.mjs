@@ -10,10 +10,14 @@ import path from 'node:path';
 const repo = process.argv[2];
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'af-rel-'));
 try {
-  // Run from INSIDE the probe's own temp root (with a flows/ copied next to it), so
+  // Run from INSIDE the probe's own temp root (with flows/, blocks/, agents/, checks/
+  // copied next to it), so
   // a relative --flow is valid there and an absolute one is rejected (26995e2e).
   // cwd = repo would make every --flow path "outside the root" by definition.
-  fs.cpSync(path.join(repo, 'flows'), path.join(root, 'flows'), { recursive: true });
+  // Only flows/ used to be copied: on #10 `run` validates the flow before it runs,
+  // and a flow whose blocks/ cannot be found is refused (E_UNKNOWN_REF), so the
+  // probe could no longer reach the manifest at all (found on 4de2dea, 08:5xZ).
+  for (const d of ['flows', 'blocks', 'agents', 'checks']) fs.cpSync(path.join(repo, d), path.join(root, d), { recursive: true });
   const r = spawnSync(process.execPath, [path.join(repo, 'bin', 'forge.js'), 'run', '--run', 'rel-1', '--flow', 'flows/main.yaml'], {
     cwd: root,
     env: { ...process.env, FORGE_ROOT: root },

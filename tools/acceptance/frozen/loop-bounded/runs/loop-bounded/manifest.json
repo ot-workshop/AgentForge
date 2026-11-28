@@ -1,0 +1,35 @@
+{
+  "run_id": "loop-bounded",
+  "run_started_at": "2026-11-27T22:18:47.275Z",
+  "flow": {
+    "path": "fixtures/loop-bounded.yaml",
+    "sha256": "ac7a04eebfc2eab641b047ca6655c3ee202e0e6c240e8d0408ef4f5151e8b2d0"
+  },
+  "blocks": {
+    "design": {
+      "ref": "block:design@1",
+      "sha256": "7ab6681a94c7c35175e68bda268c9f2f6552549ce8d546658ed9b221ade348e0",
+      "validator": "forge-protocol-v1",
+      "result": "ok"
+    },
+    "build": {
+      "ref": "block:build@1",
+      "sha256": "31f80efade8a9dd033721e1ef127a2684e411599908929fb342975f8f04c44d1",
+      "validator": "forge-protocol-v1",
+      "result": "ok"
+    },
+    "verify": {
+      "ref": "block:verify@1",
+      "sha256": "f46c8bf707a19da48525c1c05f4c1e59608af6399fb0d23c32307e2abfda5fde",
+      "validator": "forge-protocol-v1",
+      "result": "ok"
+    },
+    "ops": {
+      "ref": "block:ops@1",
+      "sha256": "c433d3c1164c2a5fc7bf968ba5f0a19c8de293118890ca0a1cb5f8aa01013d1c",
+      "validator": "forge-protocol-v1",
+      "result": "ok"
+    }
+  },
+  "status": "ok"
+}
