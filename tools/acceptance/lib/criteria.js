@@ -420,15 +420,18 @@ edges:
 // `run` in the scratch checkout. Returns rc plus the parsed events. A crash (spawn
 // error, signal, or the CLI's own `internal error` line) becomes `failed` with that
 // line, so the row reports it instead of throwing.
-// `opts.timeoutMs`: flows that must be bounded (the branch and re-entry ones, whose reds
-// would otherwise walk to the 120s default).
+// `opts.timeoutMs` is set only where a red could make the walk long: the reds re-run the
+// row on copies and a mutant that walks away must not hold the suite.
 function runIn(dir, runId, flow, fake, opts = {}) {
   const runsDir = path.join(dir, '.forge', 'runs');
   const count = () => (fs.existsSync(runsDir) ? fs.readdirSync(runsDir).length : 0);
   const runsBefore = count();
-  const r = node(path.join(dir, 'bin', 'forge.js'), ['run', '--run', runId, '--flow', flow], { cwd: dir, env: { FORGE_ROOT: dir, FORGE_FAKE: fake }, ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) });
+  const r = node(path.join(dir, 'bin', 'forge.js'), ['run', '--run', runId, '--flow', flow], { cwd: dir, env: { FORGE_ROOT: dir, FORGE_FAKE: fake }, timeoutMs: opts.timeoutMs ?? 60_000 });
   const runsAfter = count();
   const out = { ...r, runsBefore, runsAfter, events: [] };
+  // A run killed by our own timeout is a failed step with the time it was given, not a
+  // crash to interpret (员工一号 580cfa1d).
+  if (r.killed) return { ...out, failed: `run --run ${runId} --flow ${flow}: killed after ${r.timeoutMs}ms` };
   if (r.error || r.signal) return { ...out, failed: `run --run ${runId} --flow ${flow}: ${r.signal ?? r.error?.code}` };
   if (/internal error/.test(r.stderr)) return { ...out, failed: `${flow}: ${rawLine(r.stderr)}` };
   const f = path.join(runsDir, runId, 'events.jsonl');
@@ -578,95 +581,26 @@ export function v4_frozenLoop(repo, { reds: withReds = WITH_REDS } = {}) {
   }
 }
 
-// M3 (员工一号 f6e0189b / 员工二号's fifth mutation "stage.start.iteration does not
-// accumulate after a plain edge"): a stage entered again after a flow.goto must be a new
-// cell `stage@2`. A loop only exists on a bounded back edge (员工一号 881cdcb9), and when
-// the bound is spent the run must stop (failed/E_LIMIT_UNBOUNDED without on_exhausted,
-// 314920dc) -- so a second entry can only be reached by spending the bound as a goto.
-// This shape: build's second entry is reached over a goto the first time and plainly --
-// via build -> verify -- the second time, and build/design must count @1 then @2.
-const PLAIN_REENTRY_FLOW = `id: reentry
-version: 1
-entry: design
-nodes:
-  - id: design
-    uses: block:design@1
-    with:
-      request: "{{input.request}}"
-  - id: build
-    uses: block:build@1
-    with:
-      plan: design
-  - id: verify
-    uses: block:verify@1
-  - id: ops
-    uses: block:ops@1
-edges:
-  - from: design
-    to: build
-    on:
-      from: check.result
-      status: pass
-  - from: build
-    to: design
-    on:
-      from: check.result
-      status: pass
-    max_iterations: 1
-  - from: build
-    to: verify
-    on:
-      from: check.result
-      status: pass
-  - from: verify
-    to: ops
-    on:
-      from: check.result
-      status: pass
-`;
+// 4b's flow: the same branch with `verify --fail--> build` at bound 2, so a verify that
+// always fails gets two turns (verify@1, verify@2) and the bound is spent at verify@2 --
+// small on purpose: the reds below must not walk far (员工一号 580cfa1d).
+const FAIL_MORE_FLOW = BRANCH_FLOW.replace('max_iterations: 2', 'max_iterations: 2');
 
-// M4 (员工一号 f6e0189b): `verify --fail--> build` (bound 1) and a plain
-// `verify -> ops` leave verify together. A failed verify presents both, and the
-// `on: status=fail` one must win (pickEdge: a conditional edge outranks a plain one);
-// the plain edge would take `verify -> ops` with a failed stage.end instead.
-const ON_PRIORITY_FLOW = `id: on-priority
-version: 1
-entry: design
-nodes:
-  - id: design
-    uses: block:design@1
-    with:
-      request: "{{input.request}}"
-  - id: build
-    uses: block:build@1
-    with:
-      plan: design
-  - id: verify
-    uses: block:verify@1
-  - id: ops
-    uses: block:ops@1
-edges:
-  - from: design
-    to: build
-  - from: build
-    to: verify
-  - from: verify
-    to: ops
-  - id: verify-to-build
-    from: verify
-    to: build
-    on:
-      from: check.result
-      status: fail
-    max_iterations: 1
-`;
+// A red's budget: a red re-runs the whole row on a mutated copy. Each `run` inside it
+// gets AF_RUN_TIMEOUT_MS (20s, SIGKILL) and the row as a whole gets RED_CHILD_TIMEOUT_MS;
+// either way a red that walks away is reported as a failed red, never waited on.
+const RED_CHILD_TIMEOUT_MS = 120_000;
 
-// Runs used to check where a runaway walk ends: a broken pickEdge or bound can make
-// the walk long but not hang (no sleeps anywhere), so these get a ceiling instead of
-// the 120s default of exec.js. The reds below depend on this: red1 (bound disabled)
-// and red2 (goto count from 0) are expected to walk up to the bound in their branch
-// flows only, never to hit a limit.
-const BRANCH_TIMEOUT_MS = 60_000;
+// A standalone run: the child's stdout, or the events the orchestrator wrote, together
+// with how it ended. The reds below only need the outcome: a mutant that changes where a
+// walk ends shows up as kill(later exit) or a different end, never as a new hang -- the
+// process exits on its own, so there is no bounded budget to wait out.
+const eventsOf = (r, runDir) => ({
+  events: fs.existsSync(path.join(runDir, 'events.jsonl')) ? readJsonl(path.join(runDir, 'events.jsonl')) : [],
+  ended: r.killed ? 'killed' : r.error || r.signal ? (r.signal ?? r.error?.code) : r.code,
+  stdout: r.stdout,
+  stderr: r.stderr,
+});
 
 // The whole loop, with and without `on_exhausted`. `fake` decides what verify does:
 // `retry-verify:2` fails verify@1/@2 and passes verify@3; `retry-verify:9` fails every
@@ -802,58 +736,50 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
 
     // ---- 第 4 条（正）: each `on: status=` edge is taken on its own outcome
     fs.writeFileSync(path.join(dir, 'fixtures', 'lb-branch.yaml'), BRANCH_FLOW);
+    fs.writeFileSync(path.join(dir, 'fixtures', 'lb-branch-more.yaml'), FAIL_MORE_FLOW);
     const bv = validateBoth(dir, 'fixtures/lb-branch.yaml');
     check('4a 分支形状 validate 放行（CLI 与库同结论）', () => [
       bv.cli.code === 0 && same(bv.cliErrors, []) && same(bv.libErrors, []),
       `cli rc=${bv.cli.code} ${JSON.stringify(bv.cliCodes)} lib ${JSON.stringify(bv.libCodes)}`,
     ], 'forge validate fixtures/lb-branch.yaml --json');
-    const pass = crashed(runIn(dir, 'v14-branch-pass', 'fixtures/lb-branch.yaml', '1', { timeoutMs: BRANCH_TIMEOUT_MS }), '4 分支：pass 边', 'forge run --run v14-branch-pass --flow fixtures/lb-branch.yaml');
+    const pass = crashed(runIn(dir, 'v14-branch-pass', 'fixtures/lb-branch.yaml', '1', { timeoutMs: RED_CHILD_TIMEOUT_MS }), '4 分支：pass 边', 'forge run --run v14-branch-pass --flow fixtures/lb-branch.yaml');
     const passStarts = startsOf(pass.events);
     check('4 分支：verify 通过走 `status=pass`（到 ops），没有 goto', () => [
       pass.code === 0 && same(passStarts, ['design@1', 'build@1', 'verify@1', 'ops@1']) && gotosOf(pass.events).length === 0 && same(lastOf(pass.events)?.payload, { status: 'ok' }),
       `rc=${pass.code} stage.start=${passStarts.join(' ')} run.end=${JSON.stringify(lastOf(pass.events)?.payload ?? null)}`,
     ], 'FORGE_FAKE=1 forge run --run v14-branch-pass --flow fixtures/lb-branch.yaml');
-    const fails = crashed(runIn(dir, 'v14-branch-fail', 'fixtures/lb-branch.yaml', 'retry-verify:9', { timeoutMs: BRANCH_TIMEOUT_MS }), '4b 分支：fail 边', 'forge run --run v14-branch-fail --flow fixtures/lb-branch.yaml');
-    const failGotos = gotosOf(fails.events);
-    check('4b 分支：verify 失败走 `status=fail`（进环），从不到 ops', () => [
-      failGotos.length === 2 && failGotos.every((g) => g.payload.from === 'verify' && g.payload.to === 'build' && g.payload.edge?.on?.status === 'fail') && !fails.events.some((e) => e.type === 'stage.start' && e.stage === 'ops') && fails.code === 1 && lastOf(fails.events)?.payload?.code === 'E_LIMIT_UNBOUNDED',
-      `rc=${fails.code} gotos=${JSON.stringify(failGotos.map((g) => `${g.payload.from}->${g.payload.to} on ${g.payload.edge?.on?.status}`))} run.end=${JSON.stringify(lastOf(fails.events)?.payload ?? null)}`,
-    ], 'FORGE_FAKE=retry-verify:9 forge run --run v14-branch-fail --flow fixtures/lb-branch.yaml');
+    // 4b: a verify that always fails, and KEEP GRABBING THE `on: fail` EDGE (bound 2):
+    // it ends at verify@2 with the bound spent, never reaching ops.
+    const fails = runIn(dir, 'v14-branch-fail', 'fixtures/lb-branch-more.yaml', 'retry-verify:99');
+    const failsJ = eventsOf(fails, path.join(dir, '.forge', 'runs', 'v14-branch-fail'));
+    const failGotos = gotosOf(failsJ.events);
+    const diesAt = failGotos.length ? `${failGotos.at(-1).payload.from}@${failGotos.at(-1).iteration}` : null;
+    check('4b 分支：verify 失败走 `status=fail`（进环），从不到 ops；它停在 verify@2（上限 2 用满）', () => [
+      failGotos.length === 2 && failGotos.every((g) => g.payload.from === 'verify' && g.payload.to === 'build' && g.payload.edge?.on?.status === 'fail') && !failsJ.events.some((e) => e.type === 'stage.start' && e.stage === 'ops') && failsJ.ended === 1 && lastOf(failsJ.events)?.payload?.code === 'E_LIMIT_UNBOUNDED' && diesAt === 'verify@2',
+      `ended=${failsJ.ended} gotos=${failGotos.length} last=${diesAt} run.end=${JSON.stringify(lastOf(failsJ.events)?.payload ?? null)}`,
+    ], 'FORGE_FAKE=retry-verify:99 forge run --run v14-branch-fail --flow fixtures/lb-branch-more.yaml');
 
-    // ---- M3 (员工一号 f6e0189b): a second entry without a goto still counts
-    fs.writeFileSync(path.join(dir, 'fixtures', 'lb-plain-reentry.yaml'), PLAIN_REENTRY_FLOW);
-    const re = crashed(runIn(dir, 'v14-plain-reentry', 'fixtures/lb-plain-reentry.yaml', 'retry-verify:99', { timeoutMs: BRANCH_TIMEOUT_MS }), 'M3 不经 goto 的第二次进入', 'forge run --run v14-plain-reentry --flow fixtures/lb-plain-reentry.yaml');
-    const reVerify = re.events.filter((e) => e.type === 'stage.start' && e.stage === 'verify').map(keyOf);
-    const reBuild = re.events.filter((e) => e.type === 'stage.start' && e.stage === 'build').map(keyOf);
-    const reDesign = re.events.filter((e) => e.type === 'stage.start' && e.stage === 'design').map(keyOf);
-    check('M3 同一阶段再次进入是新的格子：build@1→build@2、design@1→design@2（不经 goto 的那一格）', () => [
-      re.code === 1 && same(reBuild, ['build@1', 'build@2']) && same(reDesign, ['design@1', 'design@2']) && !re.events.some((e) => e.type === 'stage.start' && e.stage === 'ops') && lastOf(re.events)?.payload?.code === 'E_LIMIT_UNBOUNDED',
-      `rc=${re.code} design=${JSON.stringify(reDesign)} build=${JSON.stringify(reBuild)} gotos=${JSON.stringify(gotosOf(re.events).map((g) => `${g.payload.from}->${g.payload.to}`))} run.end=${JSON.stringify(lastOf(re.events)?.payload ?? null)}`,
-    ], 'FORGE_FAKE=retry-verify:99 forge run --run v14-plain-reentry --flow fixtures/lb-plain-reentry.yaml');
-
-    // ---- M4 (员工一号 f6e0189b): `on: fail` outranks a plain edge out of the same stage
-    fs.writeFileSync(path.join(dir, 'fixtures', 'lb-on-priority.yaml'), ON_PRIORITY_FLOW);
-    const pr = crashed(runIn(dir, 'v14-on-priority', 'fixtures/lb-on-priority.yaml', 'retry-verify:9', { timeoutMs: BRANCH_TIMEOUT_MS }), 'M4 on 边优先于普通边', 'forge run --run v14-on-priority --flow fixtures/lb-on-priority.yaml');
-    const prGotos = gotosOf(pr.events);
-    check('M4 `on: fail` 与普通边同时可选时选 `on` 那条（失败不进 ops）', () => [
-      prGotos.length === 1 && prGotos[0].payload.from === 'verify' && prGotos[0].payload.to === 'build' && prGotos[0].payload.edge?.on?.status === 'fail' && !pr.events.some((e) => e.type === 'stage.start' && e.stage === 'ops') && pr.code === 1 && lastOf(pr.events)?.payload?.code === 'E_LIMIT_UNBOUNDED',
-      `rc=${pr.code} gotos=${JSON.stringify(prGotos.map((g) => `${g.payload.from}->${g.payload.to}`))} ops entered=${pr.events.some((e) => e.type === 'stage.start' && e.stage === 'ops')} run.end=${JSON.stringify(lastOf(pr.events)?.payload ?? null)}`,
-    ], 'FORGE_FAKE=retry-verify:9 forge run --run v14-on-priority --flow fixtures/lb-on-priority.yaml');
-
+    // M3 (员工二号's fifth mutation: a second entry as a new cell) and M4 (`on:` outranks a
+    // plain edge) are NOT judged here: 员工一号 1c4df2e6 took them out of PR #16 and opens
+    // them as separate tasks after the merge, so this row reports them as uncovered.
     // ---- reds: break one thing at a time; each must turn this row red. Each red re-runs
     // the row (without its reds) on the mutated copy in a child process, bounded by
     // RED_TIMEOUT_MS, so a mutation that makes `run` hang is reported, not waited on.
     // The child loads THIS suite file (not the copy's), so `<copy>` holds only the
     // checkout under test -- if the suite were the copy's, a red of the copy would
     // find its own reds and recurse.
-    const RED_TIMEOUT_MS = 120_000;
     const red = async (rid, what, mutate) => {
       let copy = null;
       try {
         copy = scratchCheckout(repo);
         const patchNote = mutate(copy) ?? '';
         const rowProbe = path.join(suiteDir(), 'probes', 'v14-row.mjs');
-        const r = runCmd(process.execPath, [rowProbe, copy], { timeoutMs: RED_TIMEOUT_MS, env: { AF_ACCEPTANCE_DIR: suiteDir(), AF_V14_ROW_ONLY: '1' } });
+        // AF_RUN_TIMEOUT_MS is inherited when the caller set one (the suite's own test for
+        // "a run that never ends must fail, not hang"); otherwise 20s per run inside a red.
+        const r = runCmd(process.execPath, [rowProbe, copy], {
+          timeoutMs: RED_CHILD_TIMEOUT_MS,
+          env: { AF_ACCEPTANCE_DIR: suiteDir(), AF_V14_ROW_ONLY: '1', ...(process.env.AF_RUN_TIMEOUT_MS ? {} : { AF_RUN_TIMEOUT_MS: '20000' }) },
+        });
         let status = null;
         try {
           status = JSON.parse(r.stdout.trim()).status;
@@ -876,7 +802,10 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
       return `${file}: ${from} -> ${to}`;
     };
     const reds = withReds ? [
-      await red('red1 overflow', '上限不再是硬限制（超上限再 goto 一次）必须红', patch('src/run.js', 'if (used + 1 > limit) {', 'if (false) {')),
+      // #12 C (员工二号 45a1374a): a bound that ends one goto early, not one that never
+      // ends. Both turn the upper-bound assertions red; this one keeps the mutant's walk
+      // finite, so a red never depends on SIGKILL to finish (员工一号 90b5db5e).
+      await red('red1 early-stop', '上限早一格收尾（used + 2 > limit）必须红', patch('src/run.js', 'if (used + 1 > limit) {', 'if (used + 2 > limit) {')),
       await red('red2 goto-count', 'flow.goto.iteration 从 0 起算必须红', patch('src/run.js', 'const gotoNo = used + 1;', 'const gotoNo = used;')),
       await red('red3 no-validate', 'run 不再先过校验器（被拒的流程照样建 run 目录）必须红', patch('src/run.js', '    if (found.length) return { exitCode: 1, runId: runId ?? null, beforeWrite: true, error: found[0] };', '    if (false) return { exitCode: 1, runId: runId ?? null, beforeWrite: true, error: found[0] };')),
       // Not `conditional = undefined`: the plain build -> verify edge then carries the
@@ -884,9 +813,6 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
       // pass in the first run. This one drops the status from the match itself.
       await red('red4 ignore-on', 'on: 的状态不再参与选边（pass/fail 边匹配同一个 status）必须红', patch('src/run.js', "  if (!e.on || typeof e.on !== 'object') return status === 'ok';", "  if (!e.on || typeof e.on !== 'object') return status === 'ok';\n  return true;")),
       await red('red5 drop-on-exhausted', 'on_exhausted 不再收尾成 ok 必须红', patch('src/run.js', 'if (taken.edge.on_exhausted) {', 'if (false) {')),
-      // M3's mutation (员工二号's fifth): the stage entry count stops accumulating, so a
-      // second entry reuses `@1`. Only PLAIN_REENTRY_FLOW's second design/build show it.
-      await red('red7 visit-count', 'stage.start.iteration 不再累加（第二次进入仍记 @1）必须红', patch('src/run.js', '      const visited = (visitCount.get(stage) ?? 0) + 1;', '      const visited = 1;')),
       await red('red6 validator-lenient', '校验器对"无上限回边"不再报 E_CYCLE 必须红', patch('src/validate.js', '    if (!bad) continue;', '    if (bad) continue;'))
     ] : [];
     const failed = checks.filter((c) => !c.ok);
@@ -894,7 +820,7 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
     return row(id, standard, ok ? 'pass' : 'fail', checks.map((c) => c.cmd), ok ? checks.map((c) => `${c.cid}: ${c.raw}`).join(' | ') : `failed: ${failed.map((c) => `${c.cid} [${c.raw}]`).join(' | ')}`, {
       checks: checks.map((c) => ({ id: c.cid, status: c.ok ? 'pass' : 'fail', raw: c.raw })),
       reds: withReds ? reds : [],
-      notes: '两条"负面"分开判：无上限回边 = validate 的 E_CYCLE（E_LIMIT_UNBOUNDED 只由运行时产出，见 src/validate.js）；运行时超限 = run.end failed/E_LIMIT_UNBOUNDED。形状在仓外副本里生成，入库的 fixture 只有 loop-bounded.yaml。共享回边（retry-t）归员工一号 test/loops.test.js，不在本条',
+      notes: '两条"负面"分开判：无上限回边 = validate 的 E_CYCLE（E_LIMIT_UNBOUNDED 只由运行时产出，见 src/validate.js）；运行时超限 = run.end failed/E_LIMIT_UNBOUNDED。形状在仓外副本里生成，入库的 fixture 只有 loop-bounded.yaml。共享回边（retry-t）归员工一号 test/loops.test.js，不在本条。**未覆盖**：M3（同一阶段经普通边再次进入仍是新格子）与 M4（`on:` 边优先于普通边）按员工一号 1c4df2e6 从本条摘出，合并后单开任务',
     });
   } finally {
     removeDir(dir);

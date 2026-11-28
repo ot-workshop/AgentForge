@@ -19,14 +19,31 @@ export function node(bin, args, opts = {}) {
 }
 
 // Any executable (bash -n, python, ...) with the same result shape as node().
+// The timeout is enforced with SIGKILL: `child_process`'s plain `timeout` sends SIGTERM,
+// which a running `forge run` does not handle, so a walk that never ends would survive it
+// and hold the whole suite (员工三号 7c90ccd9, 员工一号 580cfa1d). A kill comes back as
+// `killed: true` with `signal: 'SIGKILL'`; callers treat that as a failed step.
+export const DEFAULT_TIMEOUT_MS = Number(process.env.AF_RUN_TIMEOUT_MS) > 0 ? Number(process.env.AF_RUN_TIMEOUT_MS) : 120_000;
+
 export function run(cmd, args, opts = {}) {
+  const timeout = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const res = spawnSync(cmd, args, {
     cwd: opts.cwd,
     env: { ...process.env, ...(opts.env ?? {}) },
     encoding: 'utf8',
-    timeout: opts.timeoutMs ?? 120_000,
+    timeout,
+    killSignal: 'SIGKILL',
   });
-  return { code: res.status, signal: res.signal, stdout: res.stdout ?? '', stderr: res.stderr ?? '', error: res.error };
+  const killed = Boolean(res.error && res.error.code === 'ETIMEDOUT') || res.signal === 'SIGKILL';
+  return {
+    code: res.status,
+    signal: res.signal,
+    killed,
+    timeoutMs: timeout,
+    stdout: res.stdout ?? '',
+    stderr: res.stderr ?? '',
+    error: res.error,
+  };
 }
 
 // One short line of a command's original output, for the report's "原始行".
