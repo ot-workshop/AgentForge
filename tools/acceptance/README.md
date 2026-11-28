@@ -7,12 +7,42 @@ One read-only entry point that judges the five final-stage standards
 ```sh
 node tools/acceptance/index.mjs --repo <checkout>          # human-readable
 node tools/acceptance/index.mjs --repo <checkout> --json   # machine-readable
-AF_REPO=<checkout> node --test tools/acceptance/test/      # the suite's own red probes
+AF_REPO=<checkout> node --test --test-timeout=120000 tools/acceptance/test/   # the suite's own red probes (slow, see below)
 ```
 
 Exit: `0` every judged row passes (未验 rows do not fail the suite), `1` any row
 fails, `2` usage error. It never writes into `<checkout>`: every probe that needs
 `.forge/` runs on a scratch copy under the OS temp dir.
+
+### Running the suite's own tests: give it a long timeout
+
+`tools/acceptance/test/` re-runs the whole suite (15 tests x one full `index` each),
+so it is **slow by design**: 员工一号 measured **705 s** for the full run (员工三号
+2 m 48 s for the one "a run that never ends must fail" test alone; ~1 min here). A plain
+`node --test tools/acceptance/test/` (default per-test timeout 30 s / whole-file
+internal timeouts) cuts it off mid-run and looks like a hang. Run it with a long
+timeout, or one test at a time:
+
+```sh
+AF_REPO=$PWD node --test --test-timeout=120000 tools/acceptance/test/          # whole file
+AF_REPO=$PWD node --test --test-name-pattern="never ends" tools/acceptance/test/   # just that one
+```
+
+The judged rows themselves (`index.mjs --repo .`) take ~30 s end to end; only `test/`
+is slow.
+
+### KNOWN GAP: the per-run SIGKILL ceiling
+
+Every `forge run` a probe starts gets `timeout` + `killSignal: 'SIGKILL'`
+(`lib/exec.js`, ceiling `AF_RUN_TIMEOUT_MS`, default 120 s), and a killed run is a
+failed step of its row. **Reproducible:** the direct child is killed at ~5 s when the
+limit is 5 s. **Not guaranteed** (员工三号 a6ddec12/cc39f9c9, 员工一号 f8b0004f):
+`spawnSync`'s timeout is unreliable for a child with long-lived grandchildren
+(`forge run` spawns `fake-runner.js` per stage) -- a 5 s limit has been seen to return
+in ~59 s, grandchildren have outlived a killed parent, and a scratch copy left behind
+by a kill is not removed (one held 11.8 MB of events). So the ceiling guarantees "the
+suite ends", not "every descendant is gone and every scratch dir removed". A
+process-group kill with provable cleanup is tracked separately.
 
 ## Rows
 

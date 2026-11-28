@@ -21,7 +21,7 @@ function row(id, standard, status, commands, raw, extra = {}) {
 
 // One `forge` invocation in a scratch root; returns the parsed stdout JSON and rc.
 function forgeJson(repo, args, env = {}) {
-  const r = node(path.join(repo, 'bin', 'forge.js'), args, { env: { FORGE_ROOT: repo, ...env } });
+  const r = node(path.join(repo, 'bin', 'forge.js'), args, { env: { FORGE_ROOT: repo, ...env }, timeoutMs: RUN_TIMEOUT_MS });
   let json = null;
   try {
     json = JSON.parse(r.stdout.trim());
@@ -176,7 +176,7 @@ export async function v2_replayEquivalence(repo) {
       const replay = node(forge, ['replay', '--run', run], { env, cwd: scratch });
       const incAll = node(forge, ['incremental', '--run', run, '--since', '0'], { env, cwd: scratch });
       const inc2 = node(forge, ['incremental', '--run', run, '--since', '2'], { env, cwd: scratch });
-      const chain = node(forge, ['verify-chain', '--run', run, '--json'], { env, cwd: scratch });
+      const chain = node(forge, ['verify-chain', '--run', run, '--json'], { cwd: scratch, env });
       // `replay` projects each event (src/project.js) and keeps only the six keys of
       // an event as the contract sees it — the on-disk line still carries `v`. So the
       // frozen file is compared through the same projection, not against raw lines.
@@ -284,6 +284,7 @@ export function v2_failureLocated(repo) {
     copyDir(repo, scratch);
     fs.rmSync(path.join(scratch, '.forge'), { recursive: true, force: true });
     const r = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'fail-1'], {
+      timeoutMs: RUN_TIMEOUT_MS,
       env: { FORGE_ROOT: scratch, FORGE_FAKE: 'fail-build' },
     });
     const failFile = path.join(scratch, '.forge', 'runs', 'fail-1', 'events.jsonl');
@@ -293,7 +294,7 @@ export function v2_failureLocated(repo) {
     const snap = forgeJson(scratch, ['snapshot', '--run', 'fail-1']);
     const cell = snap.json?.runs?.[0]?.stages?.find((s) => s.stage === 'build');
     const reds = [];
-    const ok = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'ok-1'], { env: { FORGE_ROOT: scratch, FORGE_FAKE: '1' } });
+    const ok = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'ok-1'], { timeoutMs: RUN_TIMEOUT_MS, env: { FORGE_ROOT: scratch, FORGE_FAKE: '1' } });
     reds.push(row(`${id}.red`, '反例：不失败的运行必须 rc=0（否则「失败被定位」是假的）', ok.code === 0 ? 'pass' : 'fail', [`FORGE_FAKE=1 run → ${ok.code}`], ''));
     return row(id, standard, located && cell?.status === 'failed' ? 'pass' : 'fail', [
       `FORGE_FAKE=fail-build run --run fail-1 → ${r.code}`,
@@ -315,6 +316,7 @@ export function v3_permissionEnforced(repo) {
     copyDir(repo, scratch);
     fs.rmSync(path.join(scratch, '.forge'), { recursive: true, force: true });
     const r = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'perm-1'], {
+      timeoutMs: RUN_TIMEOUT_MS,
       env: { FORGE_ROOT: scratch, FORGE_FAKE: 'touch-checks' },
     });
     const file = path.join(scratch, '.forge', 'runs', 'perm-1', 'events.jsonl');
@@ -322,7 +324,7 @@ export function v3_permissionEnforced(repo) {
     const gap = events.filter((e) => e.type === 'stage.end' && e.payload?.error?.code === 'E_PERMISSION_GAP');
     const blocked = gap.length > 0 && r.code !== 0;
     // 反例：正常执行器不得出现任何错误
-    const ok = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'perm-ok'], { env: { FORGE_ROOT: scratch, FORGE_FAKE: '1' } });
+    const ok = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'perm-ok'], { timeoutMs: RUN_TIMEOUT_MS, env: { FORGE_ROOT: scratch, FORGE_FAKE: '1' } });
     const okFile = path.join(scratch, '.forge', 'runs', 'perm-ok', 'events.jsonl');
     const okEvents = fs.existsSync(okFile) ? readJsonl(okFile) : [];
     const clean = ok.code === 0 && !okEvents.some((e) => e.type === 'stage.end' && e.payload?.error);
@@ -422,11 +424,17 @@ edges:
 // line, so the row reports it instead of throwing.
 // `opts.timeoutMs` is set only where a red could make the walk long: the reds re-run the
 // row on copies and a mutant that walks away must not hold the suite.
+// The one ceiling every `forge run` the suite starts gets (员工一号 580cfa1d, 员工三号
+// a6ddec12: a walk that never ends must be SIGKILLed and reported, wherever the run was
+// started from). A flow whose bound check is gone walks forever, so every run needs it,
+// not only the ones `runIn` starts (see the KNOWN GAP in lib/exec.js).
+const RUN_TIMEOUT_MS = Number(process.env.AF_RUN_TIMEOUT_MS) > 0 ? Number(process.env.AF_RUN_TIMEOUT_MS) : 60_000;
+
 function runIn(dir, runId, flow, fake, opts = {}) {
   const runsDir = path.join(dir, '.forge', 'runs');
   const count = () => (fs.existsSync(runsDir) ? fs.readdirSync(runsDir).length : 0);
   const runsBefore = count();
-  const r = node(path.join(dir, 'bin', 'forge.js'), ['run', '--run', runId, '--flow', flow], { cwd: dir, env: { FORGE_ROOT: dir, FORGE_FAKE: fake }, timeoutMs: opts.timeoutMs ?? 60_000 });
+  const r = node(path.join(dir, 'bin', 'forge.js'), ['run', '--run', runId, '--flow', flow], { cwd: dir, env: { FORGE_ROOT: dir, FORGE_FAKE: fake }, timeoutMs: opts.timeoutMs ?? RUN_TIMEOUT_MS });
   const runsAfter = count();
   const out = { ...r, runsBefore, runsAfter, events: [] };
   // A run killed by our own timeout is a failed step with the time it was given, not a
@@ -638,11 +646,11 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
       noLimit.cli.code === noLimit.lib.code && same(noLimit.cliCodes, noLimit.libCodes) && noLimit.libErrors !== null && same(noLimit.cliErrors.map((e) => e.ids), noLimit.libErrors.map((e) => e.ids)),
       `cli=${JSON.stringify(noLimit.cliCodes)} lib=${JSON.stringify(noLimit.libCodes)} ids=${JSON.stringify((noLimit.libErrors ?? []).map((e) => e.ids))}`,
     ], 'node tools/acceptance/probes/lib-validate.mjs <checkout> fixtures/lb-no-limit.yaml');
+    const bounded = validateBoth(dir, LOOP);
     check('5c 校验器输出里没有 E_LIMIT_UNBOUNDED（只有运行时会产出）', () => [
-      ![noLimit, validateBoth(dir, LOOP)].some((v) => [...(v.cliCodes ?? []), ...(v.libCodes ?? [])].includes('E_LIMIT_UNBOUNDED')),
+      ![noLimit, bounded].some((v) => [...(v.cliCodes ?? []), ...(v.libCodes ?? [])].includes('E_LIMIT_UNBOUNDED')),
       'codes seen by validate: E_CYCLE only',
     ], 'read both validate verdicts');
-    const bounded = validateBoth(dir, LOOP);
     check('5d 有上限的同形回边（入库 fixture）放行', () => [
       bounded.cli.code === 0 && same(bounded.cliErrors, []) && same(bounded.libErrors, []),
       `rc=${bounded.cli.code} codes=${JSON.stringify(bounded.cliCodes)}`,
@@ -768,17 +776,17 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
     // The child loads THIS suite file (not the copy's), so `<copy>` holds only the
     // checkout under test -- if the suite were the copy's, a red of the copy would
     // find its own reds and recurse.
-    const red = async (rid, what, mutate) => {
+    const red = (rid, what, mutate) => {
       let copy = null;
       try {
         copy = scratchCheckout(repo);
         const patchNote = mutate(copy) ?? '';
         const rowProbe = path.join(suiteDir(), 'probes', 'v14-row.mjs');
-        // AF_RUN_TIMEOUT_MS is inherited when the caller set one (the suite's own test for
-        // "a run that never ends must fail, not hang"); otherwise 20s per run inside a red.
+            // The red's runs share the row's ceiling, so the suite's own "a run that never ends
+        // must fail" test (AF_RUN_TIMEOUT_MS=5000) reaches the reds too.
         const r = runCmd(process.execPath, [rowProbe, copy], {
           timeoutMs: RED_CHILD_TIMEOUT_MS,
-          env: { AF_ACCEPTANCE_DIR: suiteDir(), AF_V14_ROW_ONLY: '1', ...(process.env.AF_RUN_TIMEOUT_MS ? {} : { AF_RUN_TIMEOUT_MS: '20000' }) },
+          env: { AF_ACCEPTANCE_DIR: suiteDir(), AF_V14_ROW_ONLY: '1', AF_RUN_TIMEOUT_MS: String(RUN_TIMEOUT_MS) },
         });
         let status = null;
         try {
@@ -805,15 +813,15 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
       // #12 C (员工二号 45a1374a): a bound that ends one goto early, not one that never
       // ends. Both turn the upper-bound assertions red; this one keeps the mutant's walk
       // finite, so a red never depends on SIGKILL to finish (员工一号 90b5db5e).
-      await red('red1 early-stop', '上限早一格收尾（used + 2 > limit）必须红', patch('src/run.js', 'if (used + 1 > limit) {', 'if (used + 2 > limit) {')),
-      await red('red2 goto-count', 'flow.goto.iteration 从 0 起算必须红', patch('src/run.js', 'const gotoNo = used + 1;', 'const gotoNo = used;')),
-      await red('red3 no-validate', 'run 不再先过校验器（被拒的流程照样建 run 目录）必须红', patch('src/run.js', '    if (found.length) return { exitCode: 1, runId: runId ?? null, beforeWrite: true, error: found[0] };', '    if (false) return { exitCode: 1, runId: runId ?? null, beforeWrite: true, error: found[0] };')),
+      red('red1 early-stop', '上限早一格收尾（used + 2 > limit）必须红', patch('src/run.js', 'if (used + 1 > limit) {', 'if (used + 2 > limit) {')),
+      red('red2 goto-count', 'flow.goto.iteration 从 0 起算必须红', patch('src/run.js', 'const gotoNo = used + 1;', 'const gotoNo = used;')),
+      red('red3 no-validate', 'run 不再先过校验器（被拒的流程照样建 run 目录）必须红', patch('src/run.js', '    if (found.length) return { exitCode: 1, runId: runId ?? null, beforeWrite: true, error: found[0] };', '    if (false) return { exitCode: 1, runId: runId ?? null, beforeWrite: true, error: found[0] };')),
       // Not `conditional = undefined`: the plain build -> verify edge then carries the
       // failed verify anyway, so the walk still enters the loop -- that one was caught
       // pass in the first run. This one drops the status from the match itself.
-      await red('red4 ignore-on', 'on: 的状态不再参与选边（pass/fail 边匹配同一个 status）必须红', patch('src/run.js', "  if (!e.on || typeof e.on !== 'object') return status === 'ok';", "  if (!e.on || typeof e.on !== 'object') return status === 'ok';\n  return true;")),
-      await red('red5 drop-on-exhausted', 'on_exhausted 不再收尾成 ok 必须红', patch('src/run.js', 'if (taken.edge.on_exhausted) {', 'if (false) {')),
-      await red('red6 validator-lenient', '校验器对"无上限回边"不再报 E_CYCLE 必须红', patch('src/validate.js', '    if (!bad) continue;', '    if (bad) continue;'))
+      red('red4 ignore-on', 'on: 的状态不再参与选边（pass/fail 边匹配同一个 status）必须红', patch('src/run.js', "  if (!e.on || typeof e.on !== 'object') return status === 'ok';", "  if (!e.on || typeof e.on !== 'object') return status === 'ok';\n  return true;")),
+      red('red5 drop-on-exhausted', 'on_exhausted 不再收尾成 ok 必须红', patch('src/run.js', 'if (taken.edge.on_exhausted) {', 'if (false) {')),
+      red('red6 validator-lenient', '校验器对"无上限回边"不再报 E_CYCLE 必须红', patch('src/validate.js', '    if (!bad) continue;', '    if (bad) continue;'))
     ] : [];
     const failed = checks.filter((c) => !c.ok);
     const ok = failed.length === 0 && (withReds ? reds.every((r) => r.status === 'pass') : true);
@@ -839,7 +847,7 @@ export function v5_humanEnds(repo) {
   try {
     copyDir(repo, scratch);
     fs.rmSync(path.join(scratch, '.forge'), { recursive: true, force: true });
-    const r = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'v5-1', '--flow', 'flows/main.yaml'], { cwd: scratch, env: { FORGE_ROOT: scratch } });
+    const r = node(path.join(scratch, 'bin', 'forge.js'), ['run', '--run', 'v5-1', '--flow', 'flows/main.yaml'], { cwd: scratch, env: { FORGE_ROOT: scratch }, timeoutMs: RUN_TIMEOUT_MS });
     const runDir = path.join(scratch, '.forge', 'runs', 'v5-1');
     const evFile = path.join(runDir, 'events.jsonl');
     const events = r.code === 0 && fs.existsSync(evFile) ? readJsonl(evFile) : [];
