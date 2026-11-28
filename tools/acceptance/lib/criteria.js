@@ -592,6 +592,54 @@ export function v4_frozenLoop(repo, { reds: withReds = WITH_REDS } = {}) {
 // 4b's flow: the same branch with `verify --fail--> build` at bound 2, so a verify that
 // always fails gets two turns (verify@1, verify@2) and the bound is spent at verify@2 --
 // small on purpose: the reds below must not walk far (员工一号 580cfa1d).
+// M4 (员工一号 5b5bd632 / f6e0189b): a failed `verify` offers the `on: status=fail`
+// back edge `verify-to-design` (bound 2) and the `on: status=fail` edge `verify-to-gate`
+// at the same time; the plain `gate -> build` is the one plain edge of the shape.
+//
+// Why it has to be this shape: `edgeMatches` lets a plain edge match only an ok stage,
+// and a failed verify offers both its `on: fail` edges, so "on edge and plain edge both
+// available at the failed stage" does not exist in this language. The priority rule
+// that IS expressible -- an `on` edge outranks a plain edge when a stage presents both,
+// and among `on` edges file order decides -- is what the red below breaks: plain edges
+// first in the stage's out list makes `verify` take `verify-to-gate` instead of the back
+// edge. (`gate` is `block:design@1`: with `block:ops@1` its input `verify.merged` is not
+// produced by a failed verify and the shape does not validate.)
+const ON_PRIORITY_FLOW = `id: on-priority
+version: 1
+entry: design
+nodes:
+  - id: design
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+  - id: build
+    uses: block:build@1
+  - id: verify
+    uses: block:verify@1
+  - id: gate
+    uses: block:design@1
+    with:
+      request: "{{input.request}}"
+edges:
+  - from: design
+    to: build
+  - from: build
+    to: verify
+  - id: verify-to-design
+    from: verify
+    to: design
+    on:
+      from: check.result
+      status: fail
+    max_iterations: 2
+  - id: verify-to-gate
+    from: verify
+    to: gate
+    on:
+      from: check.result
+      status: fail
+`;
+
 const FAIL_MORE_FLOW = BRANCH_FLOW.replace('max_iterations: 2', 'max_iterations: 2');
 
 // A red's budget: a red re-runs the whole row on a mutated copy. Each `run` inside it
@@ -767,6 +815,27 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
       `ended=${failsJ.ended} gotos=${failGotos.length} last=${diesAt} run.end=${JSON.stringify(lastOf(failsJ.events)?.payload ?? null)}`,
     ], 'FORGE_FAKE=retry-verify:99 forge run --run v14-branch-fail --flow fixtures/lb-branch-more.yaml');
 
+    // ---- M4 (员工一号 5b5bd632): the `on: fail` back edge outranks the other `on` edge and
+    // every plain edge out of the same failed stage. Judged on which edge was taken, not
+    // on the run's outcome: both ways the run ends `run.end ok` with a bound of 2.
+    fs.writeFileSync(path.join(dir, 'fixtures', 'lb-on-priority.yaml'), ON_PRIORITY_FLOW);
+    const bop = validateBoth(dir, 'fixtures/lb-on-priority.yaml');
+    check('M4a `on: fail` 两条边同出 verify 的形状过 validate（CLI 与库同结论）', () => [
+      bop.cli.code === 0 && same(bop.cliErrors, []) && same(bop.libErrors, []),
+      `cli rc=${bop.cli.code} ${JSON.stringify(bop.cliCodes)} lib ${JSON.stringify(bop.libCodes)}`,
+    ], 'forge validate fixtures/lb-on-priority.yaml --json');
+    // One run, 0.2s: with the priority in place `verify@1`/`verify@2` fail and take the
+    // back edge, `verify@3` passes; the bound is never spent (no run.end failed needed).
+    const op = runIn(dir, 'v14-on-priority', 'fixtures/lb-on-priority.yaml', 'retry-verify:2', { timeoutMs: RED_CHILD_TIMEOUT_MS });
+    const opJ = eventsOf(op, path.join(dir, '.forge', 'runs', 'v14-on-priority'));
+    const opGotos = gotosOf(opJ.events);
+    // The red is what proves this check looks at the edge: with plain edges first it
+    // fails as `gotos=[] started=… verify@1 gate@1 …` (no goto at all, gate entered).
+    check('M4 verify 失败时选 `on: fail` 回边 verify->design（写 goto，不走 verify->gate）；反例 red8 下应变成 gotos=[] 并进入 gate', () => [
+      opGotos.length === 2 && opGotos.every((g) => g.payload.from === 'verify' && g.payload.to === 'design' && g.payload.loopId === 'verify-to-design') && !opJ.events.some((e) => e.type === 'flow.goto' && e.payload.to === 'gate') && same(lastOf(opJ.events)?.payload, { status: 'ok' }),
+      `gotos=${JSON.stringify(opGotos.map((g) => `${g.payload.from}->${g.payload.to} ${g.payload.loopId}`))} started=${startsOf(opJ.events).join(' ')} run.end=${JSON.stringify(lastOf(opJ.events)?.payload ?? null)}`,
+    ], 'FORGE_FAKE=retry-verify:2 forge run --run v14-on-priority --flow fixtures/lb-on-priority.yaml（同一形状在 red8 下是 gotos=[]、进了 gate）');
+
     // M3 (员工二号's fifth mutation: a second entry as a new cell) and M4 (`on:` outranks a
     // plain edge) are NOT judged here: 员工一号 1c4df2e6 took them out of PR #16 and opens
     // them as separate tasks after the merge, so this row reports them as uncovered.
@@ -821,7 +890,9 @@ export async function v4_loops(repo, { reds: withReds = WITH_REDS } = {}) {
       // pass in the first run. This one drops the status from the match itself.
       red('red4 ignore-on', 'on: 的状态不再参与选边（pass/fail 边匹配同一个 status）必须红', patch('src/run.js', "  if (!e.on || typeof e.on !== 'object') return status === 'ok';", "  if (!e.on || typeof e.on !== 'object') return status === 'ok';\n  return true;")),
       red('red5 drop-on-exhausted', 'on_exhausted 不再收尾成 ok 必须红', patch('src/run.js', 'if (taken.edge.on_exhausted) {', 'if (false) {')),
-      red('red6 validator-lenient', '校验器对"无上限回边"不再报 E_CYCLE 必须红', patch('src/validate.js', '    if (!bad) continue;', '    if (bad) continue;'))
+      red('red6 validator-lenient', '校验器对"无上限回边"不再报 E_CYCLE 必须红', patch('src/validate.js', '    if (!bad) continue;', '    if (bad) continue;')),
+      // M4's mutation: plain edges first in the stage's out list.
+      red('red8 plain-before-on', '普通边排到 `on` 边之前（出边列表最前）必须红', patch('src/run.js', '    out.get(e.from).push(e);', '    out.get(e.from).unshift(e);'))
     ] : [];
     const failed = checks.filter((c) => !c.ok);
     const ok = failed.length === 0 && (withReds ? reds.every((r) => r.status === 'pass') : true);
